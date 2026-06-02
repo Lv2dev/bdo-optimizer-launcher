@@ -67,7 +67,7 @@ jobs:
 
       - name: UI structure check
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File '.ai\scripts\check_button_layout.ps1'
+        run: powershell -ExecutionPolicy Bypass -File 'scripts\check_button_layout.ps1'
 
       - name: Cargo build --release --locked
         run: cargo build --release --locked

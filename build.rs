@@ -27,7 +27,7 @@ fn main() {
             "app.dev.manifest"
         };
         res.set_manifest_file(manifest);
-        // 멀티 해상도 아이콘. .ai/scripts/generate_icon.ps1로 생성.
+        // 멀티 해상도 아이콘 리소스.
         res.set_icon("assets/app.ico");
         res.compile().expect("failed to embed Windows resources");
     }

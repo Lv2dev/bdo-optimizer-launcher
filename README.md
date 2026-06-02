@@ -137,7 +137,7 @@ bdo-optimizer-launcher.exe
 - **언어**: Rust (edition 2021) + Slint 1.x
 - **빌드**: `cargo build --release`
 - **테스트**: `cargo test --all-targets`
-- **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps -- -D warnings` / `.ai/scripts/check_button_layout.ps1`
+- **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps -- -D warnings` / `scripts/check_button_layout.ps1`
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`, `release.yml`)
 - **라이센스**: 본 저장소 LICENSE 파일 참고. 임베드 폰트(나눔고딕)는 SIL Open Font License 1.1.
 

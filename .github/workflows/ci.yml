@@ -49,4 +49,4 @@ jobs:
       - uses: actions/checkout@v4
       - name: check_button_layout.ps1
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File .ai/scripts/check_button_layout.ps1
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_button_layout.ps1

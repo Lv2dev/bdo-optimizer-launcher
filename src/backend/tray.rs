@@ -25,7 +25,7 @@ pub struct TrayHandle {
 }
 
 // assets/tray_16.png을 컴파일 타임에 임베드해 트레이 아이콘으로 사용한다.
-// .ai/scripts/generate_icon.ps1로 생성한 16x16 RGBA PNG.
+// 16x16 RGBA PNG 트레이 아이콘.
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../../assets/tray_16.png");
 
 // M66b: thiserror enum.
