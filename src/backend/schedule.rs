@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
+
+// 스케줄 파일 쓰기 직렬화 락(설정과 동일 정책). add/delete/toggle의 load→save 구간을
+// 호출처가 이 락 아래에서 수행해 동시 호출 시 갱신 유실을 막는다.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn write_lock() -> MutexGuard<'static, ()> {
+    WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScheduleKind {
@@ -106,7 +117,7 @@ fn backup_broken(path: &std::path::Path) {
 pub fn save_rules(rules: &[ScheduleRule]) {
     if let Some(path) = config_path() {
         if let Ok(json) = serde_json::to_string(rules) {
-            let _ = std::fs::write(path, json);
+            let _ = super::atomic_write(&path, json.as_bytes());
         }
     }
 }

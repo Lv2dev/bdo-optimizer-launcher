@@ -115,10 +115,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_title_matches_app_shell_title() {
-        let app_src = include_str!("../../ui/app.slint");
-        assert!(app_src.contains(r#"title: "BDO Optimizer""#));
-        assert_eq!(WINDOW_TITLE, "BDO Optimizer");
+    fn window_title_matches_tauri_config_title() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        assert_eq!(config["productName"].as_str(), Some(WINDOW_TITLE));
+        assert_eq!(
+            config["app"]["windows"][0]["title"].as_str(),
+            Some(WINDOW_TITLE)
+        );
     }
 
     #[test]

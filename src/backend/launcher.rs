@@ -12,8 +12,9 @@ pub enum LaunchResult {
 }
 
 // M76: 사용자 입력 경로의 trim/이름 검증을 pure fn으로 격리하기 위해 분리.
-// M77: deny-list 분기는 제거됨(사용자 결정). 사용자가 settings에 명시 입력한
-// launcher_path는 신뢰 가정 — high-risk user-writable 위치 검증은 적용하지 않는다.
+// M77: USERPROFILE 하위 정품 설치(Documents/Games, Downloads 등)는 허용하기로 결정.
+// M95: 단, 드로퍼가 흔히 쓰는 staging 위치(%APPDATA%/%LOCALAPPDATA%/%TEMP%/%TMP%)만
+//      좁게 거부해 elevated 권한 상승 표면을 줄인다(USERPROFILE 전체 deny는 미적용).
 enum UserPathDecision {
     Use(PathBuf),
     Ignore,
@@ -47,15 +48,24 @@ pub fn launch_game(user_path: &str) -> LaunchResult {
     }
 }
 
-// 사용자 입력 경로를 분류한다. p.exists()는 보지 않으며 trim/이름 검증만 한다.
-// M77 이후 deny-list 분기는 제거.
+// 사용자 입력 경로를 분류한다. p.exists()는 보지 않으며 trim/이름 검증 + staging deny만 한다.
 fn classify_user_path(user_path: &str) -> UserPathDecision {
+    classify_user_path_with_roots(user_path, &super::high_risk_staging_roots())
+}
+
+// 순수 분류 로직: env/fs를 읽지 않고 staging deny-list를 인자로 받아 테스트 가능하게 둔다.
+fn classify_user_path_with_roots(user_path: &str, deny_roots: &[PathBuf]) -> UserPathDecision {
     let cleaned = user_path.trim().trim_matches('"');
     if cleaned.is_empty() {
         return UserPathDecision::Ignore;
     }
     let p = PathBuf::from(cleaned);
     if !is_launcher_exe(&p) {
+        return UserPathDecision::Ignore;
+    }
+    // M95: staging 위치(%APPDATA%/%LOCALAPPDATA%/%TEMP%/%TMP%)의 동명 런처를 elevated로
+    // spawn하는 권한 상승을 차단한다. USERPROFILE 하위 정품 설치(M77)는 통과한다.
+    if super::is_high_risk_user_writable_path(&p, deny_roots) {
         return UserPathDecision::Ignore;
     }
     UserPathDecision::Use(p)
@@ -152,8 +162,8 @@ mod tests {
         )));
     }
 
-    // M76: classify_user_path는 trim/이름 검증만 보고 p.exists()를 보지 않으므로
-    // fully pure. M77 이후 deny-list 분기는 제거됨 — 사용자 명시 경로는 신뢰 가정.
+    // M76: classify_user_path는 p.exists()를 보지 않는다. 분류 로직은
+    // classify_user_path_with_roots로 분리해 staging deny-list를 인자 주입으로 테스트한다.
     #[test]
     fn classify_empty_or_whitespace_is_ignored() {
         assert!(matches!(classify_user_path(""), UserPathDecision::Ignore));
@@ -203,6 +213,45 @@ mod tests {
             }
             _ => panic!("trim/quote stripping 실패"),
         }
+    }
+
+    // M95: staging 위치(%APPDATA%/%TEMP% 등)의 동명 런처는 elevated 실행에서 거부(Ignore).
+    #[test]
+    fn classify_rejects_staging_dir_launcher() {
+        let roots = vec![
+            PathBuf::from(r"C:\Users\alice\AppData\Local\Temp"),
+            PathBuf::from(r"C:\Users\alice\AppData\Roaming"),
+        ];
+        assert!(matches!(
+            classify_user_path_with_roots(
+                r"C:\Users\alice\AppData\Local\Temp\stage\BlackDesertLauncher.exe",
+                &roots
+            ),
+            UserPathDecision::Ignore
+        ));
+    }
+
+    // M95/M77: staging 밖 프로필 설치(Documents/Games, Downloads)는 계속 허용(Use).
+    #[test]
+    fn classify_allows_profile_install_outside_staging() {
+        let roots = vec![
+            PathBuf::from(r"C:\Users\alice\AppData\Local\Temp"),
+            PathBuf::from(r"C:\Users\alice\AppData\Roaming"),
+        ];
+        assert!(matches!(
+            classify_user_path_with_roots(
+                r"C:\Users\alice\Documents\Games\BDO\BlackDesertLauncher.exe",
+                &roots
+            ),
+            UserPathDecision::Use(_)
+        ));
+        assert!(matches!(
+            classify_user_path_with_roots(
+                r"C:\Users\alice\Downloads\BlackDesertLauncher.exe",
+                &roots
+            ),
+            UserPathDecision::Use(_)
+        ));
     }
 
     // M76 (CR-2): 드라이브 풀스캔이 후보 경로의 이름 검증을 누락하지 않는지

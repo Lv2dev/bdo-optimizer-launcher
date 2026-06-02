@@ -2,7 +2,7 @@
 
 검은사막(BlackDesert64.exe) 실행 + 성능 최적화 + 자동화를 위한 Windows 데스크톱 앱입니다.
 
-기존 Windows 배치 스크립트 기반 런처를 **Rust + Slint UI**로 재구현한 단일 실행 파일(.exe)이며, 시스템 트레이 상주 + 시간표 자동 모드 전환 + PC 예약 종료 + 실시간 자원 모니터링을 한 화면에서 관리합니다.
+기존 Windows 배치 스크립트 기반 런처를 **Rust + Tauri/React UI**로 재구현한 단일 실행 파일(.exe)이며, 시스템 트레이 상주 + 시간표 자동 모드 전환 + PC 예약 종료 + 실시간 자원 모니터링을 한 화면에서 관리합니다.
 
 ---
 
@@ -59,7 +59,7 @@ Get-Content .\SHA256SUMS.txt
 | **업데이트 알림** | 설정 탭에서 GitHub Release 최신 버전을 확인하고, 새 버전이 있으면 릴리스 페이지를 엽니다. 실행 파일 자동 교체는 하지 않습니다 |
 | **자원 모니터링** | 검은사막 프로세스의 CPU/메모리/GPU/VRAM/FPS 실시간 + 코어별 사용률 |
 | **테마** | 라이트/다크/Windows 자동 (OS 설정 추종) |
-| **접근성** | Tab 키 순회, Ctrl+1~4 탭 단축키, ESC 캘린더 dismiss, 모든 컴포넌트 FocusScope + 키보드 활성화 |
+| **접근성** | Tab 키 순회, Ctrl+1~4 탭 단축키, ESC 캘린더 dismiss, 주요 커스텀 컨트롤의 키보드 활성화 |
 
 ---
 
@@ -134,10 +134,10 @@ bdo-optimizer-launcher.exe
 
 ## 개발자 정보
 
-- **언어**: Rust (edition 2021) + Slint 1.x
-- **빌드**: `cargo build --release`
-- **테스트**: `cargo test --all-targets`
-- **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps -- -D warnings` / `scripts/check_button_layout.ps1`
+- **언어**: Rust (edition 2021) + Tauri v2 + React/Vite
+- **빌드**: `npm run build` 후 `cargo build --release --locked`
+- **테스트**: `cargo test --all-targets --locked`
+- **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps --locked -- -D warnings` / `npm run check:design-parity` / `npm run build`
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`, `release.yml`)
 - **라이센스**: 본 저장소 LICENSE 파일 참고. 임베드 폰트(나눔고딕)는 SIL Open Font License 1.1.
 

@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-slint = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
@@ -14,9 +14,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 thiserror = "1"
 ureq = "2"
-# M80: tray_ui worker thread를 blocking select!로 변경하기 위한 명시 의존성.
-# tray-icon 0.19가 transitive로 가지고 있어 빌드 시간/바이너리 영향 0.
-crossbeam-channel = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -31,10 +28,7 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ] }
-tray-icon = "0.19"
 ferrisetw = "1.2"
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
-slint-build = "1"
-winres = "0.1"
+tauri-build = "2"

@@ -300,29 +300,53 @@ unsafe fn pwstr_to_string(p: PWSTR) -> String {
     String::from_utf16_lossy(slice)
 }
 
-// `\Processor Information(*)\% Processor Time`에서 코어별 사용률을 수집한다.
-// instance name이 "_Total"이면 제외, "group,cpu" 파싱 후 정렬된 코어 인덱스 순서로 반환.
-unsafe fn pdh_collect_per_core(counter: PdhCounter) -> Vec<f64> {
-    let mut size = 0u32;
-    let mut count = 0u32;
-    let _ = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None);
-    if size == 0 || count == 0 {
-        return Vec::new();
+// PDH_FMT_COUNTERVALUE_ITEM_W는 PWSTR 포인터 + i64/f64 union을 포함해 8바이트 정렬을 요구한다.
+// 정렬 1짜리 Vec<u8>를 캐스팅해 참조를 만들면 미정렬 참조 생성으로 UB가 되므로, 8정렬이 보장되는
+// Vec<u64> 버퍼에 PDH가 쓰게 한다. 아래 const 단언으로 8정렬 가정을 컴파일 타임에 고정한다.
+const _: () =
+    assert!(std::mem::align_of::<PDH_FMT_COUNTERVALUE_ITEM_W>() <= std::mem::align_of::<u64>());
+
+// PDH 2-call 패턴: 크기 질의 → 8정렬 버퍼 할당 → 채우기. 성공 시 (버퍼, item_count) 반환.
+// 반환된 버퍼는 호출처가 살려둬야 item의 szName 포인터(버퍼 내부 문자열 영역)가 유효하다.
+unsafe fn pdh_collect_raw(counter: PdhCounter, fmt: PDH_FMT) -> Option<(Vec<u64>, usize)> {
+    let mut buffer_size: u32 = 0;
+    let mut item_count: u32 = 0;
+    let _ = PdhGetFormattedCounterArrayW(counter, fmt, &mut buffer_size, &mut item_count, None);
+    if buffer_size == 0 || item_count == 0 {
+        return None;
     }
-    let mut buf: Vec<u8> = vec![0; size as usize];
+    // ceil(buffer_size / 8) u64 = 8정렬 + 최소 buffer_size 바이트 확보.
+    let words = (buffer_size as usize).div_ceil(std::mem::size_of::<u64>());
+    let mut buf = vec![0u64; words];
     let res = PdhGetFormattedCounterArrayW(
         counter,
-        PDH_FMT_DOUBLE,
-        &mut size,
-        &mut count,
+        fmt,
+        &mut buffer_size,
+        &mut item_count,
         Some(buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W),
     );
     if res != 0 {
-        return Vec::new();
+        return None;
     }
-    let items_ptr = buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W;
-    let items = std::slice::from_raw_parts(items_ptr, count as usize);
-    let mut pairs: Vec<((u32, u32), f64)> = Vec::with_capacity(count as usize);
+    Some((buf, item_count as usize))
+}
+
+// 8정렬 버퍼에서 item_count개의 item 슬라이스를 본다. 버퍼 수명 동안만 유효하다.
+unsafe fn pdh_items(buf: &[u64], item_count: usize) -> &[PDH_FMT_COUNTERVALUE_ITEM_W] {
+    std::slice::from_raw_parts(
+        buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W,
+        item_count,
+    )
+}
+
+// `\Processor Information(*)\% Processor Time`에서 코어별 사용률을 수집한다.
+// instance name이 "_Total"이면 제외, "group,cpu" 파싱 후 정렬된 코어 인덱스 순서로 반환.
+unsafe fn pdh_collect_per_core(counter: PdhCounter) -> Vec<f64> {
+    let Some((buf, count)) = pdh_collect_raw(counter, PDH_FMT_DOUBLE) else {
+        return Vec::new();
+    };
+    let items = pdh_items(&buf, count);
+    let mut pairs: Vec<((u32, u32), f64)> = Vec::with_capacity(count);
     for item in items {
         let name = pwstr_to_string(item.szName);
         if name == "_Total" {
@@ -366,30 +390,28 @@ unsafe fn pdh_collect_items(
     counter: PdhCounter,
     fmt: PDH_FMT,
 ) -> Option<Vec<PDH_FMT_COUNTERVALUE_ITEM_W>> {
-    let mut buffer_size: u32 = 0;
-    let mut item_count: u32 = 0;
-    let _ = PdhGetFormattedCounterArrayW(counter, fmt, &mut buffer_size, &mut item_count, None);
-    if buffer_size == 0 || item_count == 0 {
-        return None;
-    }
-    let mut buf: Vec<u8> = vec![0; buffer_size as usize];
-    let res = PdhGetFormattedCounterArrayW(
-        counter,
-        fmt,
-        &mut buffer_size,
-        &mut item_count,
-        Some(buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W),
-    );
-    if res != 0 {
-        return None;
-    }
-    let items_ptr = buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W;
-    let items = std::slice::from_raw_parts(items_ptr, item_count as usize);
-    Some(items.to_vec())
+    let (buf, count) = pdh_collect_raw(counter, fmt)?;
+    Some(pdh_items(&buf, count).to_vec())
 }
 
 impl Drop for Monitor {
     fn drop(&mut self) {
         self.close_pdh();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_instance;
+
+    #[test]
+    fn parse_instance_splits_group_and_cpu() {
+        assert_eq!(parse_instance("0,0"), (0, 0));
+        assert_eq!(parse_instance("0,5"), (0, 5));
+        assert_eq!(parse_instance("1,12"), (1, 12));
+        // 비정상/부분 입력은 0으로 폴백한다.
+        assert_eq!(parse_instance("_Total"), (0, 0));
+        assert_eq!(parse_instance(""), (0, 0));
+        assert_eq!(parse_instance("3"), (3, 0));
     }
 }
