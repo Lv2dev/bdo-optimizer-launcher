@@ -1,0 +1,281 @@
+import { Theme } from "theme.slint";
+
+export component CheckIcon inherits Rectangle {
+    in property <color> icon-color: #27ae60;
+
+    min-width: 14px;
+    preferred-width: 14px;
+    max-width: 14px;
+    min-height: 14px;
+    preferred-height: 14px;
+    max-height: 14px;
+    background: #00000000;
+
+    Path {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 14;
+        viewbox-height: 14;
+        fill: #00000000;
+        stroke: root.icon-color;
+        stroke-width: 2px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        MoveTo { x: 3; y: 7; }
+        LineTo { x: 6; y: 10; }
+        LineTo { x: 12; y: 4; }
+    }
+}
+
+// Sparkline: Windows 작업관리자 성능 탭 스타일.
+// dashed grid(가로 4 + 세로 9) + area fill + 라인 stroke.
+// stroke commands는 open polyline, fill-commands는 우하단/좌하단 닫힘 포함 area path.
+export component Sparkline inherits Rectangle {
+    in property <string> commands;        // open path (stroke 전용)
+    in property <string> fill-commands;   // closed path (fill 전용)
+    in property <color> stroke-color: Theme.tgl-on;
+    in property <length> line-width: 1.4px;
+    in property <bool> show-grid: true;
+
+    background: transparent;
+    clip: true;
+
+    // 가로 grid 4선 (20/40/60/80%) — dashed 효과는 작은 사각형 시퀀스
+    if root.show-grid : Rectangle {
+        x: 0; y: parent.height * 20%;
+        width: parent.width; height: 1px;
+        background: Theme.text-desc; opacity: 0.10;
+    }
+    if root.show-grid : Rectangle {
+        x: 0; y: parent.height * 40%;
+        width: parent.width; height: 1px;
+        background: Theme.text-desc; opacity: 0.10;
+    }
+    if root.show-grid : Rectangle {
+        x: 0; y: parent.height * 60%;
+        width: parent.width; height: 1px;
+        background: Theme.text-desc; opacity: 0.10;
+    }
+    if root.show-grid : Rectangle {
+        x: 0; y: parent.height * 80%;
+        width: parent.width; height: 1px;
+        background: Theme.text-desc; opacity: 0.10;
+    }
+    // 세로 grid 9선 (10/20/.../90%) — 시간축
+    if root.show-grid : Rectangle {
+        for tick in [10, 20, 30, 40, 50, 60, 70, 80, 90] : Rectangle {
+            x: parent.width * (tick / 100);
+            y: 0;
+            width: 1px;
+            height: parent.height;
+            background: Theme.text-desc;
+            opacity: 0.08;
+        }
+    }
+
+    // Area fill — 라인 색 반투명. 작업관리자 특유의 fill 인상.
+    // viewbox 1000×100(aspect 10)으로 박스 가로(aspect ~7)보다 길게 두어 가로 풀 채움.
+    Path {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0;
+        viewbox-width: 1000; viewbox-height: 100;
+        commands: root.fill-commands;
+        fill: root.stroke-color;
+        opacity: 0.22;
+        stroke: transparent;
+        stroke-width: 0px;
+    }
+
+    // 메인 라인 — 작업관리자는 단일 stroke. round cap/join.
+    Path {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0;
+        viewbox-width: 1000; viewbox-height: 100;
+        commands: root.commands;
+        fill: transparent;
+        stroke: root.stroke-color;
+        stroke-width: root.line-width;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        opacity: 1.0;
+    }
+}
+
+export component SectionHeader inherits VerticalLayout {
+    in property <string> label;
+    in property <string> desc;
+    spacing: 4px;
+    Text {
+        text: label;
+        color: Theme.text-section;
+        font-size: 10px;
+        font-weight: 700;
+    }
+    Text {
+        text: desc;
+        color: Theme.text-desc;
+        font-size: 11px;
+        wrap: word-wrap;
+    }
+}
+
+// 카드별 도움말 ?. hover = 임시 표시 / 클릭 = 고정(X 버튼/Esc로 해제).
+// 클릭 토글 아님 — 항상 pinned=true로 설정. 해제는 X 또는 Esc만.
+// ta 영역 24x24(시각 16x16) + 마지막 declare로 z-order 보장 → 카드 TouchArea 흡수 회피.
+// 절대 위치 tooltip Rectangle. 부모 카드 외곽 Rectangle 마지막 자식 + 카드별 z literal 차등 필요.
+export component HelpTooltip inherits Rectangle {
+    in property <string> text;
+    in property <length> tooltip-width: 260px;
+    in property <string> anchor: "right";
+    in-out property <bool> pinned: false;
+
+    out property <bool> open: ta.has-hover || root.pinned;
+
+    min-width: 16px;
+    preferred-width: 16px;
+    max-width: 16px;
+    min-height: 16px;
+    preferred-height: 16px;
+    max-height: 16px;
+    background: transparent;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: root.open ? Theme.tgl-on : (Theme.dark ? #3a3d5a : #c0c4d4);
+        background: root.pinned
+            ? (Theme.dark ? #2e3a5a : #d8e2f4)
+            : (Theme.dark ? #2a2c4a : #e8eaf4);
+        animate border-color { duration: 150ms; easing: ease-out; }
+        animate background { duration: 150ms; easing: ease-out; }
+        Text {
+            text: "?";
+            font-size: 11px;
+            font-weight: 700;
+            color: root.open ? Theme.tgl-on : Theme.text-desc;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            animate color { duration: 150ms; easing: ease-out; }
+        }
+    }
+
+    fs := FocusScope {
+        x: 0;
+        y: 0;
+        width: 16px;
+        height: 16px;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.pinned = true;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.pinned) {
+                root.pinned = false;
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    Rectangle {
+        x: -1px;
+        y: -1px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        border-width: 2px;
+        border-color: Theme.tgl-on;
+        background: transparent;
+        opacity: fs.has-focus ? 0.9 : 0.0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+    }
+
+    // ta는 마지막 declare = z 최상위 + 영역 24x24로 클릭 빗나감 흡수
+    ta := TouchArea {
+        x: -4px;
+        y: -4px;
+        width: 24px;
+        height: 24px;
+        mouse-cursor: pointer;
+        clicked => {
+            fs.focus();
+            root.pinned = true;
+        }
+    }
+
+    accessible-role: button;
+    accessible-label: "도움말";
+    accessible-action-default => { root.pinned = true; }
+
+    if root.open : Rectangle {
+        x: root.anchor == "right" ? -root.tooltip-width + 16px + 8px : 8px;
+        y: 22px;
+        width: root.tooltip-width;
+        height: tip-body.preferred-height;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.dark ? #3a3d5a : #c0c4d4;
+        background: Theme.dark ? #1a1c30 : #ffffff;
+        opacity: root.open ? 1.0 : 0.0;
+        animate opacity { duration: 150ms * Theme.motion-scale; easing: ease-out; }
+        tip-body := VerticalLayout {
+            width: 100%;
+            padding-left: 10px;
+            // pinned 시 우측 ✕ 버튼 영역(20px) 확보 — 텍스트 잘림 회피
+            padding-right: root.pinned ? 34px : 10px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 4px;
+            Text {
+                text: root.text;
+                font-size: 11px;
+                color: Theme.text-hi;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
+
+        // ✕ 닫기 버튼 (pinned 시만 표시). 글리프는 Path 도형 — 폰트 fallback 회피.
+        if root.pinned : Rectangle {
+            x: parent.width - 26px;
+            y: 6px;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: close-ta.has-hover
+                ? (Theme.dark ? #4a2030 : #f0c0c0)
+                : (Theme.dark ? #2a1a24 : #f4e0e0);
+            animate background { duration: 120ms; easing: ease-out; }
+            Path {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 10px;
+                height: 10px;
+                viewbox-width: 10;
+                viewbox-height: 10;
+                fill: transparent;
+                stroke: Theme.dark ? #ff8080 : #c0392b;
+                stroke-width: 1.6px;
+                stroke-line-cap: round;
+                MoveTo { x: 1.5; y: 1.5; }
+                LineTo { x: 8.5; y: 8.5; }
+                MoveTo { x: 8.5; y: 1.5; }
+                LineTo { x: 1.5; y: 8.5; }
+            }
+            close-ta := TouchArea {
+                width: 100%;
+                height: 100%;
+                mouse-cursor: pointer;
+                clicked => { root.pinned = false; }
+            }
+        }
+    }
+}

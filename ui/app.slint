@@ -1,0 +1,486 @@
+﻿import { LineEdit, ScrollView, CheckBox, ComboBox } from "std-widgets.slint";
+import { ScheduleRuleUi, CalendarDayUi, Theme, ThemeMode, RuleKind, OptimizeMode } from "theme.slint";
+import { CheckIcon, SectionHeader } from "widgets.slint";
+import { DBtn, TwoButtonRow, ToggleSwitch, TabBtn, BadgedDBtn, OptimizeRow } from "buttons.slint";
+import { CalendarPicker, TimePicker } from "pickers.slint";
+import { MonitorTab } from "tabs/monitor.slint";
+import { SettingsTab } from "tabs/settings.slint";
+import { ControlTab } from "tabs/control.slint";
+import { ScheduleTab } from "tabs/schedule.slint";
+// M54: 나눔고딕 임베드 (SIL OFL 1.1). default-font-family로 전역 적용.
+import "../assets/fonts/NanumGothic.ttf";
+import "../assets/fonts/NanumGothicBold.ttf";
+export { ScheduleRuleUi, CalendarDayUi, Theme, ThemeMode, RuleKind, OptimizeMode }
+
+
+
+export component AppWindow inherits Window {
+    title: "BDO Optimizer";
+    icon: @image-url("../assets/app_256.png");
+    default-font-family: "Nanum Gothic";
+    preferred-width: 600px;
+    preferred-height: 720px;
+    background: Theme.bg;
+    animate background { duration: 220ms * Theme.motion-scale; easing: ease; }
+
+    in-out property <string> status-text: "대기 중입니다.";
+    in-out property <bool>   admin-ok: false;
+    in-out property <bool>   game-running: false;
+    in-out property <string> launcher-path: "";
+
+    in-out property <bool>   shutdown-weekly: false;
+    in-out property <string> shutdown-once-date: "";
+    in-out property <string> shutdown-time: "";
+    // 달력 상태
+    in-out property <bool>   cal-open: false;
+    in-out property <int>    cal-year: 2026;
+    in-out property <int>    cal-month: 5;
+    in-out property <int>    cal-selected-day: 0;
+    in-out property <int>    cal-today-day: 0;
+    in-out property <[CalendarDayUi]> cal-days: [];
+    in-out property <string> cal-month-label: "";
+    in-out property <string> cal-selected-label: "날짜 선택";
+    // 시간 스피너
+    in-out property <int>    shutdown-hour: 0;
+    in-out property <int>    shutdown-minute: 0;
+    in-out property <string> shutdown-hour-text: "00";
+    in-out property <string> shutdown-minute-text: "00";
+    in-out property <bool>   shutdown-mon: false;
+    in-out property <bool>   shutdown-tue: false;
+    in-out property <bool>   shutdown-wed: false;
+    in-out property <bool>   shutdown-thu: false;
+    in-out property <bool>   shutdown-fri: false;
+    in-out property <bool>   shutdown-sat: false;
+    in-out property <bool>   shutdown-sun: false;
+
+    in-out property <string>           active-rule-info: "활성 규칙 없음.";
+    in-out property <[ScheduleRuleUi]> schedule-rules: [];
+    in-out property <string>           new-rule-name: "";
+    in-out property <RuleKind>         new-rule-kind: RuleKind.daily;
+    in-out property <string>           new-rule-date: "";
+    in-out property <string>           new-rule-start: "";
+    in-out property <string>           new-rule-end: "";
+    in-out property <OptimizeMode>     new-rule-mode: OptimizeMode.high;
+
+    in-out property <ThemeMode> theme-mode: ThemeMode.system;
+    in-out property <bool>   schedule-empty: true;
+    // M79 (MA-C2): string current-mode-text 제거. enum + bool로 타입 안전 비교.
+    // current-mode-known=false면 모드 적용 안 됨/알 수 없음. label은 Slint 안 derived.
+    in-out property <OptimizeMode> current-mode: OptimizeMode.normal;
+    in-out property <bool>   current-mode-known: false;
+    in-out property <int>    active-tab: 0;
+    in-out property <bool>   reduce-motion: false;
+    callback toggle-reduce-motion(bool);
+    in-out property <bool>   auto-tray-on-game-minimize: false;
+    callback toggle-auto-tray(bool);
+    in-out property <bool>   close-to-tray: true;
+    callback toggle-close-to-tray(bool);
+    // 시작프로그램 등록 상태. schtasks가 진실의 근거, 매 진입 시 query.
+    in-out property <bool>   autostart-enabled: false;
+    in-out property <bool>   autostart-minimized: false;
+    callback toggle-autostart(bool);
+    callback toggle-autostart-minimized(bool);
+    callback open-log-folder();
+    callback launcher-path-changed(string);
+    // 모니터 탭 (인덱스 3) 표시 데이터. 게임 미실행 또는 다른 탭이면 freeze.
+    in-out property <string> mon-cpu: "--";
+    in-out property <string> mon-mem-mb: "--";
+    in-out property <string> mon-gpu: "--";
+    in-out property <string> mon-vram-mb: "--";
+    in-out property <string> mon-disk-r: "--";
+    in-out property <string> mon-disk-w: "--";
+    in-out property <string> mon-pid: "--";
+    in-out property <string> sys-cpu-name: "";
+    in-out property <string> sys-gpu-name: "";
+    // M62-1: build.rs에서 Cargo.toml 버전을 main.rs 경유로 주입.
+    in-out property <string> app-version: "dev";
+    in-out property <string> update-status-text: "업데이트 확인 전.";
+    in-out property <bool>   update-available: false;
+    in-out property <bool>   update-checking: false;
+    in-out property <string> update-release-url: "";
+    callback check-for-updates();
+    callback open-update-release();
+    in-out property <string> mon-fps: "측정 중...";
+    // 막대 모드용 0~100 백분율 (메모리/VRAM/FPS는 cap 기준 환산).
+    in-out property <float>  mon-cpu-pct: 0.0;
+    in-out property <float>  mon-mem-pct: 0.0;
+    in-out property <float>  mon-gpu-pct: 0.0;
+    in-out property <float>  mon-vram-pct: 0.0;
+    in-out property <float>  mon-fps-pct: 0.0;
+    // 모니터 sparkline path commands (SVG path data, viewbox 0~100).
+    // -spark: stroke 전용 open path. -spark-fill: 우하단/좌하단 닫힘 포함 fill path.
+    in-out property <string> mon-cpu-spark;
+    in-out property <string> mon-cpu-spark-fill;
+    in-out property <string> mon-mem-spark;
+    in-out property <string> mon-mem-spark-fill;
+    in-out property <string> mon-gpu-spark;
+    in-out property <string> mon-gpu-spark-fill;
+    in-out property <string> mon-vram-spark;
+    in-out property <string> mon-vram-spark-fill;
+    in-out property <string> mon-fps-spark;
+    in-out property <string> mon-fps-spark-fill;
+    // 코어별 CPU 보기 (true=막대, false=합계만).
+    in-out property <bool>   mon-cores-view: false;
+    callback toggle-mon-cores-view();
+    // 코어 영역 내 세부 보기 토글 (false=막대, true=차트).
+    in-out property <bool>   mon-core-detail-chart: false;
+    callback toggle-mon-core-detail();
+    // 검은사막 자원 모니터 메인 보기 토글 (true=차트, false=막대). 기본 차트.
+    in-out property <bool>   mon-main-chart-view: true;
+    callback toggle-mon-main-view();
+    // 시스템 코어 사용률 (0~100). 비어 있으면 코어별 영역 hide.
+    in-out property <[float]> mon-cores: [];
+    // 각 코어 affinity 상태(게임이 사용 가능하면 true).
+    in-out property <[bool]>  mon-cores-active: [];
+    // 각 코어의 sparkline path commands (60칸 sliding window 기반).
+    in-out property <[string]> mon-core-sparks: [];
+    in-out property <[string]> mon-core-sparks-fill: [];
+    in-out property <float>  mode-ripple: 0.0;
+    in-out property <bool>   shutdown-expanded: false;
+    in-out property <bool>   auto-mode-expanded: false;
+    in-out property <string> shutdown-once-text: "";
+    in-out property <bool>   shutdown-once-active: false;
+    in-out property <string> shutdown-weekly-text: "";
+    in-out property <bool>   shutdown-weekly-active: false;
+    in-out property <string> prev-status-text: "";
+
+    // === M19 애니메이션 상태 ===
+    in-out property <float> pulse-phase: 0.0;
+    in-out property <float> app-fade: 0.0;
+    in-out property <float> shutdown-flash: 0.0;
+    in-out property <int>   active-tab-prev: 0;
+
+    pulse-timer := Timer {
+        interval: 60ms;
+        // 활성 시각 요소가 하나라도 있을 때만 tick (idle CPU/GPU 절약).
+        running: root.admin-ok || root.game-running || !root.schedule-empty;
+        triggered => {
+            // 0 ~ 360 도 진동, 약 3초 cycle (60ms × 50tick = 3s, step 7.2도)
+            root.pulse-phase = Math.mod(root.pulse-phase + 7.2, 360);
+        }
+    }
+    flash-timer := Timer {
+        // 25ms step × 0.025 감쇠 = 1.5s 동안 1.5 → 0 직선 보간.
+        // animate opacity transition trailing 충돌을 피하기 위해 step을 작게 분할.
+        interval: 25ms;
+        running: root.shutdown-flash > 0.0;
+        triggered => {
+            root.shutdown-flash = Math.max(0.0, root.shutdown-flash - 0.025);
+        }
+    }
+    init => {
+        root.app-fade = 1.0;
+        fs.focus();
+    }
+    changed shutdown-once-text => {
+        if (root.shutdown-once-text != "") {
+            root.shutdown-flash = 1.5;
+        }
+    }
+    changed shutdown-weekly-text => {
+        if (root.shutdown-weekly-text != "") {
+            root.shutdown-flash = 1.5;
+        }
+    }
+
+    callback apply-high-mode();
+    callback apply-normal-mode();
+    callback apply-low-power-mode();
+    callback launch-game();
+    callback refresh-game-status();
+    callback register-shutdown();
+    callback cancel-once-shutdown();
+    callback cancel-weekly-shutdown();
+    callback cal-prev-month();
+    callback cal-next-month();
+    callback cal-select-day(int);
+    callback shutdown-hour-up();
+    callback shutdown-hour-down();
+    callback shutdown-minute-up();
+    callback shutdown-minute-down();
+    callback shutdown-hour-set(string);
+    callback shutdown-minute-set(string);
+    callback add-schedule-rule();
+    callback delete-schedule-rule(int);
+    callback toggle-schedule-rule(int);
+    callback change-theme(ThemeMode);
+
+    // 키보드 단축키: Ctrl+1~4로 탭 전환. FocusScope가 모든 자식을 감싸 root에 포커스 위임.
+    // ESC: 캘린더 펼침 상태일 때 닫기. Slint ScrollView 제약으로 "외부 클릭 닫기"는
+    // 깔끔히 구현이 어려워(2026-05-19 M39-1), 표준 ESC dismiss로 대체.
+    fs := FocusScope {
+        key-pressed(event) => {
+            if (event.modifiers.control && event.text == "1") {
+                root.active-tab = 0;
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "2") {
+                root.active-tab = 1;
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "3") {
+                root.active-tab = 2;
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "4") {
+                root.active-tab = 3;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.cal-open) {
+                root.cal-open = false;
+                return accept;
+            }
+            return reject;
+        }
+    }
+    VerticalLayout {
+        opacity: root.app-fade;
+        animate opacity { duration: 360ms * Theme.motion-scale; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+
+        Rectangle {
+            height: 48px;
+            background: @linear-gradient(135deg, Theme.title-grad-1 0%, Theme.title-grad-2 100%);
+            border-color: Theme.panel-bd;
+            border-width: 1px;
+            animate background { duration: 220ms * Theme.motion-scale; easing: ease; }
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                alignment: center;
+
+                Text {
+                    text: "BDO Optimizer";
+                    font-size: 15px;
+                    font-weight: 800;
+                    color: Theme.text-accent;
+                    letter-spacing: 0px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        Rectangle {
+            height: 40px;
+            background: Theme.tab-bar-bg;
+            border-color: Theme.panel-bd;
+            border-width: 1px;
+            animate background { duration: 220ms * Theme.motion-scale; easing: ease; }
+
+            HorizontalLayout {
+                TabBtn { text: "제어"; active: root.active-tab == 0; horizontal-stretch: 1; clicked => { root.active-tab = 0; } }
+                TabBtn { text: "스케줄"; active: root.active-tab == 1; horizontal-stretch: 1; clicked => { root.active-tab = 1; } }
+                TabBtn { text: "모니터"; active: root.active-tab == 2; horizontal-stretch: 1; clicked => { root.active-tab = 2; } }
+                TabBtn { text: "설정"; active: root.active-tab == 3; horizontal-stretch: 1; clicked => { root.active-tab = 3; } }
+            }
+        }
+
+        // P3 cross-fade: 4개 탭을 같은 Rectangle 안에 항상 mount + opacity로 토글.
+        // visible은 active-tab 따라 toggle해 비활성 탭 클릭 차단. opacity는 animate로 200ms fade.
+        Rectangle {
+            vertical-stretch: 1;
+            background: transparent;
+
+            ControlTab {
+                x: root.active-tab == 0 ? 0px : 12px;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                visible: root.active-tab == 0;
+                opacity: root.active-tab == 0 ? 1.0 : 0.0;
+                animate opacity { duration: 200ms * Theme.motion-scale; easing: ease-out; }
+                animate x { duration: 240ms * Theme.motion-scale; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                admin-ok: root.admin-ok;
+                game-running: root.game-running;
+                current-mode: root.current-mode;
+                current-mode-known: root.current-mode-known;
+                schedule-empty: root.schedule-empty;
+                active-rule-info: root.active-rule-info;
+                pulse-phase: root.pulse-phase;
+                mode-ripple: root.mode-ripple;
+                // M89-1: 스케줄 타일 자동 종료 요약을 위한 binding.
+                shutdown-once-active: root.shutdown-once-active;
+                shutdown-once-text: root.shutdown-once-text;
+                shutdown-weekly-active: root.shutdown-weekly-active;
+                shutdown-weekly-text: root.shutdown-weekly-text;
+                refresh-game-status => { root.refresh-game-status(); }
+                launch-game => { root.launch-game(); }
+                apply-high-mode => { root.apply-high-mode(); }
+                apply-normal-mode => { root.apply-normal-mode(); }
+                apply-low-power-mode => { root.apply-low-power-mode(); }
+            }
+
+            ScheduleTab {
+                x: root.active-tab == 1 ? 0px : 12px;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                visible: root.active-tab == 1;
+                opacity: root.active-tab == 1 ? 1.0 : 0.0;
+                animate opacity { duration: 200ms * Theme.motion-scale; easing: ease-out; }
+                animate x { duration: 240ms * Theme.motion-scale; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                auto-mode-expanded <=> root.auto-mode-expanded;
+                schedule-empty: root.schedule-empty;
+                active-rule-info: root.active-rule-info;
+                schedule-rules: root.schedule-rules;
+                new-rule-name <=> root.new-rule-name;
+                new-rule-kind <=> root.new-rule-kind;
+                new-rule-date <=> root.new-rule-date;
+                new-rule-start <=> root.new-rule-start;
+                new-rule-end <=> root.new-rule-end;
+                new-rule-mode <=> root.new-rule-mode;
+                shutdown-flash: root.shutdown-flash;
+                shutdown-once-text: root.shutdown-once-text;
+                shutdown-once-active: root.shutdown-once-active;
+                shutdown-weekly-text: root.shutdown-weekly-text;
+                shutdown-weekly-active: root.shutdown-weekly-active;
+                shutdown-expanded <=> root.shutdown-expanded;
+                shutdown-weekly <=> root.shutdown-weekly;
+                cal-open <=> root.cal-open;
+                cal-selected-label: root.cal-selected-label;
+                cal-days: root.cal-days;
+                cal-month-label: root.cal-month-label;
+                cal-selected-day: root.cal-selected-day;
+                cal-today-day: root.cal-today-day;
+                shutdown-mon <=> root.shutdown-mon;
+                shutdown-tue <=> root.shutdown-tue;
+                shutdown-wed <=> root.shutdown-wed;
+                shutdown-thu <=> root.shutdown-thu;
+                shutdown-fri <=> root.shutdown-fri;
+                shutdown-sat <=> root.shutdown-sat;
+                shutdown-sun <=> root.shutdown-sun;
+                shutdown-hour-text: root.shutdown-hour-text;
+                shutdown-minute-text: root.shutdown-minute-text;
+                add-schedule-rule => { root.add-schedule-rule(); }
+                delete-schedule-rule(id) => { root.delete-schedule-rule(id); }
+                toggle-schedule-rule(id) => { root.toggle-schedule-rule(id); }
+                cal-prev-month => { root.cal-prev-month(); }
+                cal-next-month => { root.cal-next-month(); }
+                cal-select-day(d) => { root.cal-select-day(d); }
+                shutdown-hour-up => { root.shutdown-hour-up(); }
+                shutdown-hour-down => { root.shutdown-hour-down(); }
+                shutdown-minute-up => { root.shutdown-minute-up(); }
+                shutdown-minute-down => { root.shutdown-minute-down(); }
+                shutdown-hour-set(t) => { root.shutdown-hour-set(t); }
+                shutdown-minute-set(t) => { root.shutdown-minute-set(t); }
+                register-shutdown => { root.register-shutdown(); }
+                cancel-once-shutdown => { root.cancel-once-shutdown(); }
+                cancel-weekly-shutdown => { root.cancel-weekly-shutdown(); }
+            }
+
+            SettingsTab {
+                x: root.active-tab == 3 ? 0px : 12px;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                visible: root.active-tab == 3;
+                opacity: root.active-tab == 3 ? 1.0 : 0.0;
+                animate opacity { duration: 200ms * Theme.motion-scale; easing: ease-out; }
+                animate x { duration: 240ms * Theme.motion-scale; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                theme-mode: root.theme-mode;
+                reduce-motion: root.reduce-motion;
+                auto-tray-on-game-minimize: root.auto-tray-on-game-minimize;
+                close-to-tray: root.close-to-tray;
+                launcher-path <=> root.launcher-path;
+                autostart-enabled: root.autostart-enabled;
+                autostart-minimized: root.autostart-minimized;
+                app-version: root.app-version;
+                update-status-text: root.update-status-text;
+                update-available: root.update-available;
+                update-checking: root.update-checking;
+                update-release-url: root.update-release-url;
+                change-theme(mode) => { root.change-theme(mode); }
+                toggle-reduce-motion(on) => { root.toggle-reduce-motion(on); }
+                toggle-auto-tray(on) => { root.toggle-auto-tray(on); }
+                toggle-close-to-tray(on) => { root.toggle-close-to-tray(on); }
+                toggle-autostart(on) => { root.toggle-autostart(on); }
+                toggle-autostart-minimized(on) => { root.toggle-autostart-minimized(on); }
+                open-log-folder => { root.open-log-folder(); }
+                launcher-path-changed(path) => { root.launcher-path-changed(path); }
+                check-for-updates => { root.check-for-updates(); }
+                open-update-release => { root.open-update-release(); }
+            }
+
+            MonitorTab {
+                x: root.active-tab == 2 ? 0px : 12px;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                visible: root.active-tab == 2;
+                opacity: root.active-tab == 2 ? 1.0 : 0.0;
+                animate opacity { duration: 200ms * Theme.motion-scale; easing: ease-out; }
+                animate x { duration: 240ms * Theme.motion-scale; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                game-running: root.game-running;
+                mon-cpu: root.mon-cpu;
+                mon-mem-mb: root.mon-mem-mb;
+                mon-gpu: root.mon-gpu;
+                mon-gpu-pct: root.mon-gpu-pct;
+                mon-vram-mb: root.mon-vram-mb;
+                mon-disk-r: root.mon-disk-r;
+                mon-disk-w: root.mon-disk-w;
+                mon-pid: root.mon-pid;
+                sys-cpu-name: root.sys-cpu-name;
+                sys-gpu-name: root.sys-gpu-name;
+                mon-fps: root.mon-fps;
+                mon-cpu-spark: root.mon-cpu-spark;
+                mon-cpu-spark-fill: root.mon-cpu-spark-fill;
+                mon-mem-spark: root.mon-mem-spark;
+                mon-mem-spark-fill: root.mon-mem-spark-fill;
+                mon-gpu-spark: root.mon-gpu-spark;
+                mon-gpu-spark-fill: root.mon-gpu-spark-fill;
+                mon-vram-spark: root.mon-vram-spark;
+                mon-vram-spark-fill: root.mon-vram-spark-fill;
+                mon-fps-spark: root.mon-fps-spark;
+                mon-fps-spark-fill: root.mon-fps-spark-fill;
+                mon-cores-view: root.mon-cores-view;
+                mon-core-detail-chart: root.mon-core-detail-chart;
+                mon-main-chart-view: root.mon-main-chart-view;
+                mon-cores: root.mon-cores;
+                mon-cores-active: root.mon-cores-active;
+                mon-core-sparks: root.mon-core-sparks;
+                mon-core-sparks-fill: root.mon-core-sparks-fill;
+                mon-cpu-pct: root.mon-cpu-pct;
+                mon-mem-pct: root.mon-mem-pct;
+                mon-vram-pct: root.mon-vram-pct;
+                mon-fps-pct: root.mon-fps-pct;
+                toggle-mon-cores-view => { root.toggle-mon-cores-view(); }
+                toggle-mon-core-detail => { root.toggle-mon-core-detail(); }
+                toggle-mon-main-view => { root.toggle-mon-main-view(); }
+            }
+        }
+
+        Rectangle {
+            min-height: 54px;
+            background: @linear-gradient(135deg, Theme.bar-grad-1 0%, Theme.bar-grad-2 100%);
+            border-color: Theme.log-bd;
+            border-width: 1px;
+            animate background { duration: 220ms * Theme.motion-scale; easing: ease; }
+            animate border-color { duration: 220ms * Theme.motion-scale; easing: ease; }
+
+            VerticalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 7px;
+                padding-bottom: 7px;
+                spacing: 2px;
+                alignment: center;
+                Text {
+                    text: root.status-text;
+                    color: Theme.text-status;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                if root.prev-status-text != "" : Text {
+                    text: root.prev-status-text;
+                    color: Theme.text-desc;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    opacity: 0.55;
+                }
+            }
+        }
+    }
+}

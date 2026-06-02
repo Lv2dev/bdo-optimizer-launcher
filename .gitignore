@@ -1,0 +1,33 @@
+# Rust build output
+/target/
+
+# AI/local assistant workspaces
+/.ai/
+/.claude/
+/.codex/
+/.superpowers/
+/docs/superpowers/
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+/ai.ps1
+*.prompt
+*.prompt.md
+
+# Local editor settings
+/.idea/
+/.vscode/
+
+# Local secrets and runtime settings
+.env
+.env.*
+!.env.example
+/settings.json
+/settings.*.json
+*.local
+*.user
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak

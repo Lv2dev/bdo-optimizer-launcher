@@ -1,0 +1,121 @@
+name: Release
+
+# tag push 시 .exe artifact 빌드 + GitHub Release 자동 생성.
+# 코드사이닝 미적용 (사용자 결정 2026-05-24). SmartScreen 우회 안내는 README.md 참고.
+# 사용법: `git tag v0.2.0 && git push origin v0.2.0`
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (예: v0.2.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write  # GitHub Release 생성 + asset 업로드
+
+jobs:
+  build:
+    name: Build Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate release tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+            throw "Release tag must look like vX.Y.Z or vX.Y.Z-prerelease: $tag"
+          }
+
+          $versionLine = Select-String -LiteralPath "Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if ($null -eq $versionLine) {
+            throw "Cargo.toml package.version not found"
+          }
+
+          $cargoVersion = $versionLine.Matches[0].Groups[1].Value
+          $expectedTag = "v$cargoVersion"
+          if ($tag -ne $expectedTag) {
+            throw "Release tag '$tag' does not match Cargo.toml version '$cargoVersion' (expected '$expectedTag')"
+          }
+
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all-targets --locked
+
+      - name: UI structure check
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File '.ai\scripts\check_button_layout.ps1'
+
+      - name: Cargo build --release --locked
+        run: cargo build --release --locked
+
+      - name: Verify .exe exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "target/release/bdo-optimizer-launcher.exe")) {
+            throw "Build artifact missing: target/release/bdo-optimizer-launcher.exe"
+          }
+          $size = (Get-Item "target/release/bdo-optimizer-launcher.exe").Length
+          Write-Host "Artifact size: $size bytes"
+
+      - name: Compute SHA-256 hash
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "target/release/bdo-optimizer-launcher.exe" -Algorithm SHA256).Hash
+          Write-Host "SHA-256: $hash"
+          "$hash  bdo-optimizer-launcher.exe" | Out-File -FilePath "target/release/SHA256SUMS.txt" -Encoding ascii
+
+      - name: Upload .exe as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdo-optimizer-launcher-${{ env.RELEASE_TAG }}
+          path: |
+            target/release/bdo-optimizer-launcher.exe
+            target/release/SHA256SUMS.txt
+          retention-days: 90
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          draft: false
+          prerelease: ${{ contains(env.RELEASE_TAG, '-rc') || contains(env.RELEASE_TAG, '-beta') }}
+          generate_release_notes: true
+          body: |
+            ## bdo-optimizer-launcher ${{ env.RELEASE_TAG }}
+
+            **SmartScreen 우회**: 첫 실행 시 "추가 정보 → 실행" — 자세한 안내는 README.md 참고.
+
+            **SHA-256 무결성 검증**: `SHA256SUMS.txt` 파일과 다운로드한 .exe의 해시 비교 권장.
+
+            **요구사항**: Windows 10 1809+ / x64 / 관리자 권한.
+
+            **변경 이력**: 자동 생성된 commit log 참고.
+          files: |
+            target/release/bdo-optimizer-launcher.exe
+            target/release/SHA256SUMS.txt

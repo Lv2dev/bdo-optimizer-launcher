@@ -1,0 +1,570 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Sparkline, HelpTooltip } from "../widgets.slint";
+import { DBtn } from "../buttons.slint";
+
+// 작업관리자 성능 탭 스타일 메트릭 카드.
+// 상단 헤더(라벨 + 값) + 그래프 영역(grid + area fill + line) + 하단 시간축 라벨.
+// 막대 모드: 한 줄 라벨 + 값 + 가로 진행 막대.
+// 절대 위치 사용 — HorizontalLayout 안 Rectangle은 stretch가 일관되지 않아 막대 track이 0 width로 사라질 수 있음.
+component MetricBar inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <float>  pct;            // 0~100
+    in property <color>  accent: Theme.tgl-on;
+
+    property <color> card-bg: Theme.dark ? #0c0d22 : #ffffff;
+    property <color> card-bd: Theme.dark ? #1c1d3a : #d6dae8;
+    property <color> track-bg: Theme.dark ? #1a1c30 : #e8eaf4;
+    property <length> label-w: 80px;
+    property <length> value-w: 130px;
+    property <length> side-pad: 12px;
+    property <length> track-h: 8px;
+
+    height: 40px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: card-bd;
+    background: card-bg;
+    clip: true;
+
+    Text {
+        x: side-pad;
+        y: (parent.height - self.height) / 2;
+        width: label-w;
+        text: root.label;
+        font-size: 10px;
+        font-weight: 700;
+        color: Theme.text-status;
+        letter-spacing: 1.0px;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        x: side-pad + label-w + 8px;
+        y: (parent.height - track-h) / 2;
+        width: parent.width - 2 * side-pad - label-w - value-w - 16px;
+        height: track-h;
+        background: track-bg;
+        border-radius: track-h / 2;
+
+        Rectangle {
+            x: 0; y: 0;
+            width: parent.width * (root.pct / 100.0);
+            height: parent.height;
+            background: root.accent;
+            border-radius: parent.border-radius;
+            animate width { duration: 280ms * Theme.motion-scale; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+        }
+    }
+
+    Text {
+        x: parent.width - side-pad - value-w;
+        y: (parent.height - self.height) / 2;
+        width: value-w;
+        text: root.value;
+        font-size: 13px;
+        font-weight: 700;
+        color: root.accent;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
+component MetricCard inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> sub-label;
+    in property <string> commands;
+    in property <string> fill-commands;
+    in property <color>  accent: Theme.tgl-on;
+    in property <length> card-height: 116px;
+
+    property <color> card-bg: Theme.dark ? #0c0d22 : #ffffff;
+    property <color> card-bd: Theme.dark ? #1c1d3a : #d6dae8;
+
+    height: card-height;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: card-bd;
+    background: card-bg;
+    clip: true;
+
+    // 헤더: 라벨 좌상단, 값 우상단
+    Text {
+        x: 12px;
+        y: 6px;
+        text: root.label;
+        font-size: 10px;
+        font-weight: 700;
+        color: Theme.text-status;
+        letter-spacing: 1.0px;
+    }
+    Text {
+        x: parent.width - self.width - 12px;
+        y: 4px;
+        text: root.value;
+        font-size: 16px;
+        font-weight: 700;
+        color: root.accent;
+    }
+
+    // 그래프 영역 — 카드 거의 전체. 헤더 24px 아래 ~ 하단 12px 위.
+    Sparkline {
+        x: 8px;
+        y: 24px;
+        width: parent.width - 16px;
+        height: parent.height - 36px;
+        commands: root.commands;
+        fill-commands: root.fill-commands;
+        stroke-color: root.accent;
+        line-width: 1.4px;
+    }
+
+    // 하단 시간축 라벨 (그래프 위 오버레이)
+    Text {
+        x: 12px;
+        y: parent.height - 14px;
+        text: root.sub-label;
+        font-size: 9px;
+        color: Theme.text-desc;
+        opacity: 0.65;
+        letter-spacing: 0.4px;
+    }
+    Text {
+        x: parent.width - self.width - 12px;
+        y: parent.height - 14px;
+        text: "30초";
+        font-size: 9px;
+        color: Theme.text-desc;
+        opacity: 0.65;
+    }
+}
+
+export component MonitorTab inherits ScrollView {
+    in property <string> sys-cpu-name;
+    in property <string> sys-gpu-name;
+    in property <bool> game-running;
+    in property <string> mon-cpu;
+    in property <string> mon-mem-mb;
+    in property <string> mon-gpu;
+    in property <float>  mon-gpu-pct;
+    in property <string> mon-vram-mb;
+    in property <string> mon-disk-r;
+    in property <string> mon-disk-w;
+    in property <string> mon-pid;
+    in property <string> mon-fps;
+    in property <string> mon-cpu-spark;
+    in property <string> mon-cpu-spark-fill;
+    in property <string> mon-mem-spark;
+    in property <string> mon-mem-spark-fill;
+    in property <string> mon-gpu-spark;
+    in property <string> mon-gpu-spark-fill;
+    in property <string> mon-vram-spark;
+    in property <string> mon-vram-spark-fill;
+    in property <string> mon-fps-spark;
+    in property <string> mon-fps-spark-fill;
+    in property <bool>   mon-cores-view;
+    in property <bool>   mon-core-detail-chart;
+    in property <bool>   mon-main-chart-view;
+    in property <float>  mon-cpu-pct;
+    in property <float>  mon-mem-pct;
+    in property <float>  mon-vram-pct;
+    in property <float>  mon-fps-pct;
+    // M44-3 number rolling: CPU/GPU pct를 400ms 보간해 부드러운 카운트 효과.
+    // in property에는 직접 animate 불가 -> derived private property로 분기.
+    // FPS는 raw float property 부재로 보류 (mon-fps string 그대로 사용).
+    property <float> mon-cpu-pct-anim: root.mon-cpu-pct;
+    property <float> mon-gpu-pct-anim: root.mon-gpu-pct;
+    animate mon-cpu-pct-anim { duration: 400ms * Theme.motion-scale; easing: ease-out; }
+    animate mon-gpu-pct-anim { duration: 400ms * Theme.motion-scale; easing: ease-out; }
+    in property <[float]> mon-cores;
+    in property <[bool]>  mon-cores-active;
+    in property <[string]> mon-core-sparks;
+    in property <[string]> mon-core-sparks-fill;
+    callback toggle-mon-cores-view();
+    callback toggle-mon-core-detail();
+    callback toggle-mon-main-view();
+
+    vertical-stretch: 1;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        alignment: start;
+        width: parent.width;
+
+        // M47: PC 사양 카드 — CPU/GPU 이름. game-running 게이팅 밖이라 항상 표시.
+        Rectangle {
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.panel-bd;
+            background: Theme.dark ? #0c0d22 : #ffffff;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "CPU";
+                        color: Theme.text-desc;
+                        font-size: 11px;
+                        width: 40px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.sys-cpu-name;
+                        color: Theme.text-hi;
+                        font-size: 12px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "GPU";
+                        color: Theme.text-desc;
+                        font-size: 11px;
+                        width: 40px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.sys-gpu-name;
+                        color: Theme.text-hi;
+                        font-size: 12px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+            z: 2;
+            m1_tip := HelpTooltip {
+                x: parent.width - 26px;
+                y: 10px;
+                text: "현재 PC의 CPU와 GPU를 표시합니다.";
+            }
+        }
+
+        Rectangle {
+            background: Theme.panel;
+            border-color: Theme.log-bd;
+            border-width: 1px;
+            border-radius: 10px;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+                alignment: start;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    // M88: 우상단 ? 영역(16x16 + margin) 확보로 보기 버튼과 겹침 방지.
+                    padding-right: 28px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: "검은사막 자원 모니터";
+                            font-size: 14px;
+                            color: Theme.text-status;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "BlackDesert64.exe 프로세스가 사용 중인 자원량입니다.";
+                            font-size: 10px;
+                            color: Theme.text-desc;
+                            opacity: 0.75;
+                        }
+                    }
+                    if root.game-running : DBtn {
+                        text: root.mon-main-chart-view ? "막대 보기" : "차트 보기";
+                        width: 80px;
+                        height: 28px;
+                        grad-1: Theme.btn-sec-1;
+                        grad-2: Theme.btn-sec-2;
+                        grad-h-1: Theme.btn-sec-2;
+                        grad-h-2: Theme.btn-sec-1;
+                        clicked => { root.toggle-mon-main-view(); }
+                    }
+                    if root.game-running : DBtn {
+                        text: root.mon-cores-view ? "전체 보기" : "코어별 보기";
+                        width: 96px;
+                        height: 28px;
+                        grad-1: Theme.btn-sec-1;
+                        grad-2: Theme.btn-sec-2;
+                        grad-h-1: Theme.btn-sec-2;
+                        grad-h-2: Theme.btn-sec-1;
+                        clicked => { root.toggle-mon-cores-view(); }
+                    }
+                }
+
+                if !root.game-running : Text {
+                    text: "검은사막이 실행되지 않았습니다.";
+                    font-size: 12px;
+                    color: Theme.text-desc;
+                    opacity: 0.7;
+                    wrap: word-wrap;
+                }
+
+                if root.game-running && root.mon-main-chart-view : VerticalLayout {
+                    spacing: 10px;
+
+                    MetricCard {
+                        label: "CPU";
+                        value: "\{Math.round(root.mon-cpu-pct-anim)}%";
+                        sub-label: "0 - 100 %";
+                        commands: root.mon-cpu-spark;
+                        fill-commands: root.mon-cpu-spark-fill;
+                        accent: #4FC3F7;
+                    }
+                    MetricCard {
+                        label: "메모리";
+                        value: root.mon-mem-mb;
+                        sub-label: "사용 / 총";
+                        commands: root.mon-mem-spark;
+                        fill-commands: root.mon-mem-spark-fill;
+                        accent: #B388FF;
+                    }
+                    MetricCard {
+                        label: "GPU";
+                        value: "\{Math.round(root.mon-gpu-pct-anim)}%";
+                        sub-label: "0 - 100 %";
+                        commands: root.mon-gpu-spark;
+                        fill-commands: root.mon-gpu-spark-fill;
+                        accent: #66BB6A;
+                    }
+                    MetricCard {
+                        label: "VRAM";
+                        value: root.mon-vram-mb;
+                        sub-label: "사용 / 총";
+                        commands: root.mon-vram-spark;
+                        fill-commands: root.mon-vram-spark-fill;
+                        accent: #FF8A65;
+                    }
+                    MetricCard {
+                        label: "FPS";
+                        value: root.mon-fps;
+                        sub-label: "0 - 240";
+                        commands: root.mon-fps-spark;
+                        fill-commands: root.mon-fps-spark-fill;
+                        accent: #FFB74D;
+                    }
+                }
+
+                if root.game-running && !root.mon-main-chart-view : VerticalLayout {
+                    spacing: 8px;
+
+                    MetricBar { label: "CPU"; value: "\{Math.round(root.mon-cpu-pct-anim)}%"; pct: root.mon-cpu-pct; accent: #4FC3F7; }
+                    MetricBar { label: "메모리"; value: root.mon-mem-mb; pct: root.mon-mem-pct; accent: #B388FF; }
+                    MetricBar { label: "GPU"; value: "\{Math.round(root.mon-gpu-pct-anim)}%"; pct: root.mon-gpu-pct; accent: #66BB6A; }
+                    MetricBar { label: "VRAM"; value: root.mon-vram-mb; pct: root.mon-vram-pct; accent: #FF8A65; }
+                    MetricBar { label: "FPS"; value: root.mon-fps; pct: root.mon-fps-pct; accent: #FFB74D; }
+                }
+
+                if root.game-running : VerticalLayout {
+                    spacing: 0px;
+
+                    // 디스크 R/W + PID 단일 행
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Theme.dark ? #1c1d3a : #d6dae8;
+                        background: Theme.dark ? #0c0d22 : #ffffff;
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 16px;
+                            alignment: center;
+                            Text {
+                                text: "디스크";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: Theme.text-status;
+                                letter-spacing: 1.0px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "R " + root.mon-disk-r + "    W " + root.mon-disk-w;
+                                font-size: 12px;
+                                color: Theme.text-desc;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "PID " + root.mon-pid;
+                                font-size: 11px;
+                                color: Theme.text-desc;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+            // M88: 자원 모니터 카드 우상단 ? — 카드 본문 padding-right 28px로 보기 버튼과 겹침 방지.
+            m2_tip := HelpTooltip {
+                x: parent.width - 26px;
+                y: 10px;
+                text: "검은사막이 사용 중인 CPU/메모리/GPU/VRAM/FPS를 실시간 표시합니다.";
+            }
+        }
+
+        // 코어별 CPU 영역 (토글 ON + 게임 실행 시).
+        if root.game-running && root.mon-cores-view : Rectangle {
+            background: Theme.panel;
+            border-color: Theme.log-bd;
+            border-width: 1px;
+            border-radius: 10px;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                alignment: start;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    // M88: 우상단 ? 영역 확보로 보기 버튼과 겹침 방지.
+                    padding-right: 28px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: "시스템 코어별 CPU";
+                            font-size: 13px;
+                            color: Theme.text-status;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "청록 = 게임이 사용 가능한 코어 (affinity ON). 회색 = 비활성.";
+                            font-size: 10px;
+                            color: Theme.text-desc;
+                            opacity: 0.75;
+                        }
+                    }
+                    DBtn {
+                        text: root.mon-core-detail-chart ? "막대 보기" : "차트 보기";
+                        width: 80px;
+                        height: 28px;
+                        grad-1: Theme.btn-sec-1;
+                        grad-2: Theme.btn-sec-2;
+                        grad-h-1: Theme.btn-sec-2;
+                        grad-h-2: Theme.btn-sec-1;
+                        clicked => { root.toggle-mon-core-detail(); }
+                    }
+                }
+
+                // 막대 모드
+                if !root.mon-core-detail-chart : VerticalLayout {
+                    spacing: 4px;
+                    for v[i] in root.mon-cores : HorizontalLayout {
+                        spacing: 8px;
+                        height: 16px;
+                        Text {
+                            text: "C" + i;
+                            font-size: 10px;
+                            color: Theme.text-desc;
+                            min-width: 24px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 10px;
+                            y: 3px;
+                            background: Theme.tgl-off;
+                            border-radius: 2px;
+                            Rectangle {
+                                x: 0;
+                                y: 0;
+                                height: parent.height;
+                                width: parent.width * (v / 100.0);
+                                background: (i < root.mon-cores-active.length && root.mon-cores-active[i])
+                                    ? #4FC3F7
+                                    : (Theme.dark ? #44485a : #b0b4c0);
+                                border-radius: 2px;
+                                animate width { duration: 280ms * Theme.motion-scale; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                                animate background { duration: 220ms * Theme.motion-scale; easing: ease-out; }
+                            }
+                        }
+                        Text {
+                            text: Math.round(v) + "%";
+                            font-size: 10px;
+                            color: Theme.text-status;
+                            min-width: 36px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // 차트 모드 — 4열 grid의 mini 카드. 코어별 height 고정으로 비교 용이.
+                // horizontal-stretch: 1로 VerticalLayout 자식이 부모 너비 채우게 한다(자식 절대 위치 측정 위해 필수).
+                if root.mon-core-detail-chart : Rectangle {
+                    property <int> cols: 4;
+                    property <length> gap: 6px;
+                    property <length> chip-h: 64px;
+                    property <length> col-w: (self.width - (cols - 1) * gap) / cols;
+                    property <int> row-count: Math.ceil(root.mon-cores.length / cols);
+
+                    horizontal-stretch: 1;
+                    height: row-count * (chip-h + gap) - gap;
+
+                    for v[i] in root.mon-cores : Rectangle {
+                        property <color> chip-bg: Theme.dark ? #0c0d22 : #ffffff;
+                        property <color> chip-bd: Theme.dark ? #1c1d3a : #d6dae8;
+                        property <color> chip-accent: (i < root.mon-cores-active.length && root.mon-cores-active[i])
+                            ? #4FC3F7
+                            : (Theme.dark ? #6c7080 : #8a8ea0);
+
+                        x: mod(i, parent.cols) * (parent.col-w + parent.gap);
+                        y: floor(i / parent.cols) * (parent.chip-h + parent.gap);
+                        width: parent.col-w;
+                        height: parent.chip-h;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: chip-bd;
+                        background: chip-bg;
+                        clip: true;
+
+                        Text {
+                            x: 8px; y: 4px;
+                            text: "C" + i;
+                            font-size: 9px;
+                            font-weight: 700;
+                            color: Theme.text-desc;
+                            letter-spacing: 0.6px;
+                        }
+                        Text {
+                            x: parent.width - self.width - 8px; y: 3px;
+                            text: Math.round(v) + "%";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: chip-accent;
+                        }
+                        Sparkline {
+                            x: 4px; y: 22px;
+                            width: parent.width - 8px;
+                            height: parent.height - 26px;
+                            commands: i < root.mon-core-sparks.length ? root.mon-core-sparks[i] : "";
+                            fill-commands: i < root.mon-core-sparks-fill.length ? root.mon-core-sparks-fill[i] : "";
+                            stroke-color: chip-accent;
+                            line-width: 1.1px;
+                            show-grid: false;
+                        }
+                    }
+                }
+            }
+            z: 1;
+            // M88: 코어별 카드 ?. 자원 모니터 m2_tip 분리, 코어별 카드 전용 텍스트.
+            m3_tip := HelpTooltip {
+                x: parent.width - 26px;
+                y: 10px;
+                text: "프로세스의 CPU affinity가 활성화된 코어를 청록으로 강조합니다.";
+            }
+        }
+    }
+}

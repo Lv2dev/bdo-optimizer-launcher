@@ -1,0 +1,52 @@
+name: CI
+
+# fmt / clippy / cargo check / 단위 테스트 / UI 구조 검증을 수행한다.
+# M69 이후 debug/test 빌드는 app.dev.manifest(asInvoker)로 임베드되어
+# 일반 (비-elevated) 셸에서 cargo test --all-targets 실제 실행이 가능하다.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: cargo check + clippy + fmt
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --no-deps --locked -- -D warnings
+
+      - name: cargo check
+        run: cargo check --all-targets --locked
+
+      - name: cargo test
+        # M69 이후 debug/test manifest는 asInvoker라 일반 셸 실행 가능.
+        run: cargo test --all-targets --locked
+
+  ui-structure:
+    name: Slint UI structure check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check_button_layout.ps1
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .ai/scripts/check_button_layout.ps1
