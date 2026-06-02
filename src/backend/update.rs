@@ -140,9 +140,29 @@ pub fn check_latest_release() -> Result<UpdateCheck, Error> {
     evaluate_release(env!("APP_VERSION"), release)
 }
 
+// release URL은 GitHub Release 페이지(html_url)만 허용한다. requireAdministrator
+// 프로세스가 explorer.exe로 임의 https URL을 여는 표면을 막기 위해 호스트를
+// github.com 계열로 화이트리스트하고, userinfo(@)·하위도메인/포트 우회 트릭을 거부한다.
+fn is_allowed_release_url(url: &str) -> bool {
+    let Some(rest) = url.trim().strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // userinfo(`github.com@evil.com`)는 호스트 위장에 쓰이므로 authority에 '@'가 있으면 거부.
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = authority
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    host == "github.com" || host.ends_with(".github.com")
+}
+
 pub fn open_release_page(url: &str) -> Result<(), Error> {
     let trimmed = url.trim();
-    if !trimmed.starts_with("https://") {
+    if !is_allowed_release_url(trimmed) {
         return Err(Error::InvalidReleaseUrl);
     }
     std::process::Command::new(super::windows_path("explorer.exe"))
@@ -206,5 +226,30 @@ mod tests {
             release.exe_asset_url.as_deref(),
             Some("https://example.invalid/app.exe")
         );
+    }
+
+    #[test]
+    fn release_url_allows_only_github_hosts() {
+        assert!(is_allowed_release_url(
+            "https://github.com/owner/repo/releases/tag/v0.2.0"
+        ));
+        assert!(is_allowed_release_url(
+            "https://api.github.com/repos/o/r/releases/latest"
+        ));
+        assert!(is_allowed_release_url("  https://github.com/owner/repo  "));
+        assert!(is_allowed_release_url("https://github.com"));
+    }
+
+    #[test]
+    fn release_url_rejects_non_github_and_spoofing_tricks() {
+        assert!(!is_allowed_release_url("http://github.com/owner/repo")); // https 아님
+        assert!(!is_allowed_release_url("https://evil.com/x"));
+        assert!(!is_allowed_release_url("https://evilgithub.com/x")); // suffix 트릭
+        assert!(!is_allowed_release_url("https://github.com.evil.com/x")); // 하위도메인 위장
+        assert!(!is_allowed_release_url("https://github.com@evil.com/x")); // userinfo 위장
+        assert!(!is_allowed_release_url("https://github.com:443@evil.com/")); // userinfo+포트
+        assert!(!is_allowed_release_url("file:///c:/windows/system32"));
+        assert!(!is_allowed_release_url("https://"));
+        assert!(!is_allowed_release_url(""));
     }
 }

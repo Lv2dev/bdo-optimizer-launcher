@@ -1,6 +1,18 @@
 use crate::backend::schedule;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
+
+// 설정 파일 쓰기 직렬화 락. load→수정→save 구간을 호출처가 이 락 아래에서 수행하면
+// 동시 호출(예: apply_mode의 last_user_mode 저장 vs set_setting) 시 갱신 유실을 막는다.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+// 설정 read-modify-write 임계구역 가드. 호출처가 보유하는 동안 다른 writer는 대기한다.
+pub fn write_lock() -> MutexGuard<'static, ()> {
+    WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 #[serde(rename_all = "lowercase")]
@@ -64,10 +76,19 @@ pub fn load_settings() -> AppSettings {
         Some(p) => p,
         None => return AppSettings::default(),
     };
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return AppSettings::default(), // 파일 없음/읽기 실패 = 신규 사용자
+    };
+    match serde_json::from_str(&content) {
+        Ok(settings) => settings,
+        Err(error) => {
+            // 손상 JSON을 조용히 기본값으로 덮어쓰지 않고, 원본을 백업하고 경고를 남긴다.
+            tracing::warn!(error = %error, "settings.json 파싱 실패 — 손상 파일 백업 후 기본값 사용");
+            backup_broken(&path);
+            AppSettings::default()
+        }
+    }
 }
 
 pub fn save_settings(settings: &AppSettings) {
@@ -79,8 +100,16 @@ pub fn save_settings(settings: &AppSettings) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(json) = serde_json::to_string(settings) {
-        let _ = std::fs::write(path, json);
+        let _ = super::atomic_write(&path, json.as_bytes());
     }
+}
+
+// schedule.rs와 동일 정책: 깨진 JSON은 빈/기본값으로 덮어쓰지 않도록 타임스탬프 백업.
+fn backup_broken(path: &std::path::Path) {
+    use chrono::Local;
+    let stamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let backup = path.with_extension(format!("json.broken-{stamp}"));
+    let _ = std::fs::rename(path, backup);
 }
 
 pub fn resolve_dark_mode(mode: ThemeMode) -> bool {

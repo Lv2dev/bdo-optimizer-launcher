@@ -96,6 +96,18 @@ pub fn high_risk_user_writable_roots() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+// launcher 전용 좁은 deny-list. M77에서 USERPROFILE 하위 정품 설치(Documents/Games,
+// Downloads 등)는 허용하기로 결정했으므로 USERPROFILE 루트는 제외하고, 드로퍼가 흔히
+// 쓰는 staging 위치(APPDATA/LOCALAPPDATA/TEMP/TMP)만 elevated spawn에서 거부한다.
+pub fn high_risk_staging_roots() -> Vec<std::path::PathBuf> {
+    ["APPDATA", "LOCALAPPDATA", "TEMP", "TMP"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
 fn normalize_path_for_prefix(path: &std::path::Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -119,6 +131,19 @@ pub fn is_high_risk_user_writable_path(
     roots: &[std::path::PathBuf],
 ) -> bool {
     roots.iter().any(|root| path_is_same_or_child(path, root))
+}
+
+// 원자적 파일 쓰기. 같은 디렉터리의 .tmp에 쓰고 flush+fsync 후 rename으로 교체한다.
+// 쓰기 도중 종료/정전이 나도 대상 파일이 0바이트로 잘리거나 부분 기록되지 않는다.
+// (호출처가 write_lock으로 직렬화하므로 .tmp 이름 충돌은 발생하지 않는다.)
+pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -186,6 +211,25 @@ mod tests {
             Path::new(r"C:\Users\alice2\file.exe"),
             root
         ));
+    }
+
+    #[test]
+    fn atomic_write_replaces_file_and_leaves_no_tmp() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("bdo_atomic_write_{}.json", std::process::id()));
+        let tmp = path.with_extension("tmp");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&tmp);
+
+        super::atomic_write(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+
+        // 기존 파일 위로 더 긴 내용을 덮어써도 전체가 교체되고 .tmp는 남지 않는다.
+        super::atomic_write(&path, b"second-longer-content").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second-longer-content");
+        assert!(!tmp.exists(), "임시 파일이 남아있으면 안 됨");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
