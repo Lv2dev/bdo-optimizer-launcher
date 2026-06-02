@@ -1,6 +1,11 @@
 # Rust build output
 /target/
 
+# Tauri/Vite generated output
+/dist/
+/gen/
+/node_modules/
+
 # AI/local assistant workspaces
 /.ai/
 /.claude/

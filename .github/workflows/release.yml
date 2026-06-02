@@ -32,8 +32,26 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+
+      - name: npm ci
+        run: npm ci
+
+      - name: npm audit
+        run: npm audit --audit-level=high
+
+      - name: Design parity check
+        run: npm run check:design-parity
+
+      - name: Frontend build
+        run: npm run build
 
       - name: Validate release tag matches Cargo.toml version
         shell: pwsh
@@ -60,14 +78,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Cargo clippy
-        run: cargo clippy --all-targets --no-deps -- -D warnings
+        run: cargo clippy --all-targets --no-deps --locked -- -D warnings
 
       - name: Cargo test
         run: cargo test --all-targets --locked
-
-      - name: UI structure check
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File 'scripts\check_button_layout.ps1'
 
       - name: Cargo build --release --locked
         run: cargo build --release --locked

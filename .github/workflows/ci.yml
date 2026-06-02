@@ -1,6 +1,6 @@
 name: CI
 
-# fmt / clippy / cargo check / 단위 테스트 / UI 구조 검증을 수행한다.
+# fmt / clippy / cargo check / 단위 테스트 / 디자인 parity 검증을 수행한다.
 # M69 이후 debug/test 빌드는 app.dev.manifest(asInvoker)로 임베드되어
 # 일반 (비-elevated) 셸에서 cargo test --all-targets 실제 실행이 가능하다.
 
@@ -42,11 +42,34 @@ jobs:
         # M69 이후 debug/test manifest는 asInvoker라 일반 셸 실행 가능.
         run: cargo test --all-targets --locked
 
-  ui-structure:
-    name: Slint UI structure check
+  frontend:
+    name: Frontend build + design parity
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: check_button_layout.ps1
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: npm audit
+        run: npm audit --audit-level=high
+
+      - name: npm run check:design-parity
+        run: npm run check:design-parity
+
+      - name: npm run build
+        run: npm run build
+
+  release-guard:
+    name: Release workflow guard
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release workflow + manifests + README
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/check_button_layout.ps1
+        run: ./scripts/check_release_workflow.ps1
