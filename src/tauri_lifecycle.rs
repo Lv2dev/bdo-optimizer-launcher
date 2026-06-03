@@ -358,14 +358,17 @@ fn apply_default_mode_on_game_launch(
     default_mode: Option<schedule::OptimizeMode>,
 ) {
     let current_present = process::find_process_id("BlackDesert64.exe").is_some();
-    let previous_present = *state
-        .previous_game_present
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *state
-        .previous_game_present
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(current_present);
+    // read-modify-write를 단일 lock 스코프로 묶는다(이전 값 읽기와 새 값 저장 사이에 lock을
+    // 두 번 따로 잡으면 그 틈에 상태가 바뀌어 transition 판정이 어긋날 수 있다).
+    let previous_present = {
+        let mut guard = state
+            .previous_game_present
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = *guard;
+        *guard = Some(current_present);
+        previous
+    };
 
     if let Some(mode) = default_mode_action(default_mode, previous_present, current_present) {
         let response = tauri_commands::apply_mode_for_lifecycle(mode, false);

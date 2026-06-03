@@ -374,24 +374,24 @@ fn pdh_add_counter(hq: PdhQuery, path: &str) -> Option<PdhCounter> {
     }
 }
 
+// buf를 합산이 끝날 때까지 살려둔 채 FmtValue(인라인 union)만 읽는다. item을 Vec로 복사해
+// 반환하면 szName이 해제된 buf를 가리키는 dangling 포인터가 되므로 그렇게 하지 않는다.
 unsafe fn pdh_sum_double(counter: PdhCounter) -> Option<f64> {
-    let items = pdh_collect_items(counter, PDH_FMT_DOUBLE)?;
-    let sum: f64 = items.iter().map(|i| i.FmtValue.Anonymous.doubleValue).sum();
+    let (buf, count) = pdh_collect_raw(counter, PDH_FMT_DOUBLE)?;
+    let sum: f64 = pdh_items(&buf, count)
+        .iter()
+        .map(|i| i.FmtValue.Anonymous.doubleValue)
+        .sum();
     Some(sum)
 }
 
 unsafe fn pdh_sum_large(counter: PdhCounter) -> Option<i64> {
-    let items = pdh_collect_items(counter, PDH_FMT_LARGE)?;
-    let sum: i64 = items.iter().map(|i| i.FmtValue.Anonymous.largeValue).sum();
+    let (buf, count) = pdh_collect_raw(counter, PDH_FMT_LARGE)?;
+    let sum: i64 = pdh_items(&buf, count)
+        .iter()
+        .map(|i| i.FmtValue.Anonymous.largeValue)
+        .sum();
     Some(sum)
-}
-
-unsafe fn pdh_collect_items(
-    counter: PdhCounter,
-    fmt: PDH_FMT,
-) -> Option<Vec<PDH_FMT_COUNTERVALUE_ITEM_W>> {
-    let (buf, count) = pdh_collect_raw(counter, fmt)?;
-    Some(pdh_items(&buf, count).to_vec())
 }
 
 impl Drop for Monitor {

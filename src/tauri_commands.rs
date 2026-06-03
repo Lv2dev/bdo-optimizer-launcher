@@ -803,7 +803,7 @@ fn read_monitor_snapshot() -> MonitorStateDto {
     };
 
     if runtime.fps_pid != Some(pid) {
-        runtime.fps_session = fps::FpsSession::start(pid).ok();
+        runtime.fps_session = fps::FpsSession::start().ok();
         runtime.fps_pid = Some(pid);
     }
 
@@ -1508,7 +1508,7 @@ pub fn register_shutdown(input: ShutdownInputDto) -> ShutdownCommandResponseDto 
                 .map(weekday_code)
                 .collect::<Vec<_>>();
             match shutdown::register_weekly_shutdown(&days, &time) {
-                Ok(()) => format!("매주 반복 종료 예약 등록 완료 ({time}시)."),
+                Ok(()) => format!("매주 반복 종료 예약 등록 완료 (매주 {time})."),
                 Err(error) => format!("오류: {error}"),
             }
         }

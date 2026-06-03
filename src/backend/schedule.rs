@@ -193,6 +193,14 @@ pub fn validate_time(s: &str) -> bool {
     if b.len() != 5 || b[2] != b':' {
         return false;
     }
+    // parse::<u8>()가 "+9"를 9로 받아들이므로('+' 수용), 숫자 4자리를 명시 검증해 거부한다("+9:30").
+    if !(b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[4].is_ascii_digit())
+    {
+        return false;
+    }
     let h: u8 = s[..2].parse().unwrap_or(255);
     let m: u8 = s[3..].parse().unwrap_or(255);
     h < 24 && m < 60
@@ -250,6 +258,8 @@ mod tests {
         assert!(!validate_time("09-30"));
         assert!(!validate_time(""));
         assert!(!validate_time("12:345"));
+        assert!(!validate_time("+9:30")); // 부호 접두 거부
+        assert!(!validate_time("12:+5"));
     }
 
     #[test]

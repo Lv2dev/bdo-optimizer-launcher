@@ -2,7 +2,7 @@
 // PresentStart 이벤트를 user-mode ETW 세션에서 구독하고, 1초 sliding window로 카운팅.
 //
 // 콜백은 ferrisetw가 spawn한 별도 worker thread에서 실행된다.
-// FpsSession은 main 스레드에서 `start(pid)`로 생성, Drop 시 ETW 세션 `stop`.
+// FpsSession은 main 스레드에서 `start()`로 생성, Drop 시 ETW 세션 `stop`.
 // 현재 FPS는 `Arc<AtomicU32>`로 공유, main 스레드는 `current_fps()`로 lock 없이 읽는다.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -46,7 +46,6 @@ pub struct FpsSession {
 }
 
 struct CallbackState {
-    pid: u32,
     timestamps: Mutex<Vec<Instant>>,
     current_fps: Arc<AtomicU32>,
     total_events: Arc<AtomicU64>,
@@ -54,14 +53,13 @@ struct CallbackState {
 }
 
 impl FpsSession {
-    pub fn start(pid: u32) -> Result<Self, Error> {
+    pub fn start() -> Result<Self, Error> {
         stop_stale_session();
 
         let current_fps = Arc::new(AtomicU32::new(0));
         let total_events = Arc::new(AtomicU64::new(0));
         let present_events = Arc::new(AtomicU64::new(0));
         let state = Arc::new(CallbackState {
-            pid,
             timestamps: Mutex::new(Vec::with_capacity(256)),
             current_fps: Arc::clone(&current_fps),
             total_events: Arc::clone(&total_events),
@@ -80,7 +78,6 @@ impl FpsSession {
                     return;
                 }
                 state_for_cb.present_events.fetch_add(1, Ordering::Relaxed);
-                let _ = state_for_cb.pid;
                 let now = Instant::now();
                 if let Ok(mut ts) = state_for_cb.timestamps.lock() {
                     ts.push(now);
