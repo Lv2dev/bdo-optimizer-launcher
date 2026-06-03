@@ -1885,6 +1885,7 @@ function App() {
   const [toast, setToast] = useState({ show: false, message: "" });
   const toastTimer = useRef(null);
   const monitorPollInFlight = useRef(false);
+  const pendingRef = useRef(null);
   const tabRefs = useRef([]);
   const [pill, setPill] = useState({ left: 0, width: 0 });
 
@@ -1915,6 +1916,7 @@ function App() {
   const runCommand = useCallback(
     async (name, command, args, shouldToast = true, trackPending = true) => {
       if (trackPending) {
+        pendingRef.current = name;
         setPending(name);
       }
       try {
@@ -1936,6 +1938,7 @@ function App() {
         }
       } finally {
         if (trackPending) {
+          pendingRef.current = null;
           setPending(null);
         }
       }
@@ -2031,14 +2034,17 @@ function App() {
     };
   }, [activeTab, runCommand, state.settings.monitorIntervalMs]);
 
+  // 5초 자동 게임상태 갱신. pending을 ref로 읽어 인터벌이 명령마다 재생성되지 않게 한다.
+  // (의존성에 pending을 넣으면 명령 호출 때마다 null→name→null 변화로 타이머가 리셋되어
+  //  자주 조작할수록 자동 갱신이 계속 밀린다.)
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (pending === null) {
+      if (pendingRef.current === null) {
         runCommand("refresh", "refresh_game_status", undefined, false, false);
       }
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [pending, runCommand]);
+  }, [runCommand]);
 
   const titleMode = state.control.currentMode
     ? MODE_META[state.control.currentMode].label
