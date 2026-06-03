@@ -27,6 +27,11 @@ fn default_true() -> bool {
     true
 }
 
+// M96 P3: 모니터 폴링 기본 간격(ms). 기존 고정값 1초와 동일하게 둔다.
+fn default_monitor_interval() -> u32 {
+    1000
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -45,6 +50,13 @@ pub struct AppSettings {
     // 자동 저전력(M34) / 자동 규칙(M7) 진입은 persist 안 함.
     #[serde(default)]
     pub last_user_mode: Option<schedule::OptimizeMode>,
+    // M96 P3: 게임(BlackDesert64) 신규 실행 감지 시 자동 적용할 기본 모드.
+    // None이면 자동 적용하지 않는다(수동). last_user_mode와 별개의 명시적 설정.
+    #[serde(default)]
+    pub default_mode: Option<schedule::OptimizeMode>,
+    // M96 P3: 모니터 탭 자원 폴링 간격(ms). 허용값 500/1000/2000, 기본 1000.
+    #[serde(default = "default_monitor_interval")]
+    pub monitor_interval_ms: u32,
 }
 
 impl Default for AppSettings {
@@ -56,6 +68,8 @@ impl Default for AppSettings {
             auto_tray_on_game_minimize: false,
             close_to_tray: true,
             last_user_mode: None,
+            default_mode: None,
+            monitor_interval_ms: 1000,
         }
     }
 }
@@ -169,5 +183,28 @@ mod tests {
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
 
         assert_eq!(settings.launcher_path, restored.launcher_path);
+    }
+
+    #[test]
+    fn app_settings_round_trips_default_mode_and_monitor_interval() {
+        let settings = AppSettings {
+            default_mode: Some(schedule::OptimizeMode::High),
+            monitor_interval_ms: 2000,
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(Some(schedule::OptimizeMode::High), restored.default_mode);
+        assert_eq!(2000, restored.monitor_interval_ms);
+    }
+
+    #[test]
+    fn app_settings_defaults_monitor_interval_and_no_default_mode() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme_mode":"dark"}"#).unwrap();
+
+        assert_eq!(None, settings.default_mode);
+        assert_eq!(1000, settings.monitor_interval_ms);
     }
 }

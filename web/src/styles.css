@@ -2309,6 +2309,28 @@ body[data-mode="light"] .accent-swatch {
   text-align: center;
 }
 
+/* M96: 푸터를 GitHub 저장소 링크 버튼으로. button 기본 스타일 제거 + 중앙 정렬 + hover 강조. */
+.app-footer-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.app-footer-link svg {
+  width: 13px;
+  height: 13px;
+}
+
+.app-footer-link:hover {
+  color: var(--txt-dim);
+}
+
 .no-top {
   margin-top: 0;
 }

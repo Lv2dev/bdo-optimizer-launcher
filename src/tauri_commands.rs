@@ -170,6 +170,9 @@ pub struct SettingsStateDto {
     pub autostart_enabled: bool,
     pub autostart_minimized: bool,
     pub launcher_path: String,
+    // M96 P3: 게임 감지 시 자동 적용할 기본 모드(None=없음/수동)와 모니터 폴링 간격(ms).
+    pub default_mode: Option<ModeDto>,
+    pub monitor_interval_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -189,6 +192,8 @@ pub enum SettingKeyDto {
     AutostartEnabled,
     AutostartMinimized,
     LauncherPath,
+    DefaultMode,
+    MonitorInterval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +203,9 @@ pub struct SettingInputDto {
     pub theme_mode: Option<ThemeModeDto>,
     pub bool_value: Option<bool>,
     pub string_value: Option<String>,
+    // M96 P3: key=DefaultMode 시 사용(null=없음). key=MonitorInterval 시 int_value(ms) 사용.
+    pub default_mode: Option<ModeDto>,
+    pub int_value: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -442,6 +450,8 @@ fn settings_state(
         autostart_enabled,
         autostart_minimized,
         launcher_path: loaded.launcher_path,
+        default_mode: loaded.default_mode.map(ModeDto::from),
+        monitor_interval_ms: loaded.monitor_interval_ms,
     }
 }
 
@@ -456,6 +466,8 @@ fn settings_state_for_test() -> SettingsStateDto {
         autostart_enabled: false,
         autostart_minimized: false,
         launcher_path: String::new(),
+        default_mode: None,
+        monitor_interval_ms: 1000,
     }
 }
 
@@ -843,6 +855,12 @@ fn validate_setting_input(input: &SettingInputDto) -> Result<(), String> {
             .bool_value
             .map(|_| ())
             .ok_or_else(|| "boolValue 값을 입력하세요.".to_string()),
+        // default_mode는 None(없음)도 유효한 선택이므로 추가 검증 없이 통과.
+        SettingKeyDto::DefaultMode => Ok(()),
+        SettingKeyDto::MonitorInterval => match input.int_value {
+            Some(500) | Some(1000) | Some(2000) => Ok(()),
+            _ => Err("모니터 갱신 주기는 500/1000/2000(ms)만 허용합니다.".to_string()),
+        },
     }
 }
 
@@ -1206,6 +1224,21 @@ pub fn set_setting(input: SettingInputDto) -> SettingsCommandResponseDto {
                 "런처 경로를 저장했습니다.".to_string()
             }
         }
+        SettingKeyDto::DefaultMode => {
+            let mut loaded = settings::load_settings();
+            loaded.default_mode = input.default_mode.map(schedule::OptimizeMode::from);
+            settings::save_settings(&loaded);
+            match loaded.default_mode {
+                Some(_) => "기본 적용 모드를 저장했습니다.".to_string(),
+                None => "기본 적용 모드를 사용 안 함으로 설정했습니다.".to_string(),
+            }
+        }
+        SettingKeyDto::MonitorInterval => {
+            let mut loaded = settings::load_settings();
+            loaded.monitor_interval_ms = input.int_value.unwrap();
+            settings::save_settings(&loaded);
+            "모니터 갱신 주기를 저장했습니다.".to_string()
+        }
         SettingKeyDto::AutostartEnabled => {
             let on = input.bool_value.unwrap();
             let result = if on {
@@ -1289,6 +1322,17 @@ pub fn open_update_release(url: String) -> StatusDto {
     }
     match update::open_release_page(&url) {
         Ok(()) => status("GitHub Release 페이지를 열었습니다."),
+        Err(error) => status(error.to_string()),
+    }
+}
+
+// M96: 앱 푸터에서 여는 GitHub 저장소 URL. open_release_page의 github.com 화이트리스트를 통과한다.
+const REPOSITORY_URL: &str = "https://github.com/Lv2dev/bdo-optimizer-launcher";
+
+#[tauri::command]
+pub fn open_repository() -> StatusDto {
+    match update::open_release_page(REPOSITORY_URL) {
+        Ok(()) => status("GitHub 저장소를 열었습니다."),
         Err(error) => status(error.to_string()),
     }
 }
@@ -1563,7 +1607,9 @@ mod tests {
                 "closeToTray": true,
                 "autostartEnabled": true,
                 "autostartMinimized": false,
-                "launcherPath": r"C:\Pearlabyss\BlackDesert\BlackDesertLauncher.exe"
+                "launcherPath": r"C:\Pearlabyss\BlackDesert\BlackDesertLauncher.exe",
+                "defaultMode": null,
+                "monitorIntervalMs": 1000
             })
         );
     }
@@ -1575,6 +1621,8 @@ mod tests {
             theme_mode: Some(ThemeModeDto::Dark),
             bool_value: None,
             string_value: None,
+            default_mode: None,
+            int_value: None,
         };
 
         let value = serde_json::to_value(input).unwrap();
@@ -1585,7 +1633,9 @@ mod tests {
                 "key": "theme_mode",
                 "themeMode": "dark",
                 "boolValue": null,
-                "stringValue": null
+                "stringValue": null,
+                "defaultMode": null,
+                "intValue": null
             })
         );
     }
@@ -1597,11 +1647,45 @@ mod tests {
             theme_mode: None,
             bool_value: None,
             string_value: None,
+            default_mode: None,
+            int_value: None,
         };
 
         let err = validate_setting_input_for_test(&input).unwrap_err();
 
         assert!(err.contains("boolValue"));
+    }
+
+    #[test]
+    fn monitor_interval_accepts_only_supported_values() {
+        let make = |ms: Option<u32>| SettingInputDto {
+            key: SettingKeyDto::MonitorInterval,
+            theme_mode: None,
+            bool_value: None,
+            string_value: None,
+            default_mode: None,
+            int_value: ms,
+        };
+
+        assert!(validate_setting_input_for_test(&make(Some(500))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(1000))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(2000))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(1500))).is_err());
+        assert!(validate_setting_input_for_test(&make(None)).is_err());
+    }
+
+    #[test]
+    fn default_mode_setting_accepts_none_selection() {
+        let input = SettingInputDto {
+            key: SettingKeyDto::DefaultMode,
+            theme_mode: None,
+            bool_value: None,
+            string_value: None,
+            default_mode: None,
+            int_value: None,
+        };
+
+        assert!(validate_setting_input_for_test(&input).is_ok());
     }
 
     #[test]

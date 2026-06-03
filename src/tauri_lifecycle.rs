@@ -52,6 +52,8 @@ struct LifecycleState {
     low_power_item: TauriMenuItem,
     quitting: AtomicBool,
     previous_game_window_visible: Mutex<Option<bool>>,
+    // M96 P3: 직전 tick의 게임 프로세스 존재 여부. 신규 등장 시 default_mode 자동 적용.
+    previous_game_present: Mutex<Option<bool>>,
     auto_restore_mode: Mutex<Option<schedule::OptimizeMode>>,
 }
 
@@ -158,6 +160,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<LifecycleState> {
         low_power_item,
         quitting: AtomicBool::new(false),
         previous_game_window_visible: Mutex::new(None),
+        previous_game_present: Mutex::new(None),
         auto_restore_mode: Mutex::new(None),
     })
 }
@@ -334,11 +337,57 @@ fn start_auto_low_power_worker(app: AppHandle) {
     });
 }
 
+// M96 P3: default_mode 자동 적용 판정. 게임이 (없음|첫 tick)에서 감지로 전환될 때만 적용한다.
+fn default_mode_action(
+    default_mode: Option<schedule::OptimizeMode>,
+    previous_present: Option<bool>,
+    current_present: bool,
+) -> Option<schedule::OptimizeMode> {
+    let mode = default_mode?;
+    match (previous_present, current_present) {
+        (None, true) | (Some(false), true) => Some(mode),
+        _ => None,
+    }
+}
+
+// 게임 신규 실행을 감지하면 default_mode를 적용한다.
+// 자동 적용이므로 last_user_mode는 갱신하지 않는다(persist=false).
+fn apply_default_mode_on_game_launch(
+    app: &AppHandle,
+    state: &LifecycleState,
+    default_mode: Option<schedule::OptimizeMode>,
+) {
+    let current_present = process::find_process_id("BlackDesert64.exe").is_some();
+    let previous_present = *state
+        .previous_game_present
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *state
+        .previous_game_present
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(current_present);
+
+    if let Some(mode) = default_mode_action(default_mode, previous_present, current_present) {
+        let response = tauri_commands::apply_mode_for_lifecycle(mode, false);
+        sync_tray_mode(
+            app,
+            response
+                .control
+                .current_mode
+                .map(schedule::OptimizeMode::from),
+        );
+    }
+}
+
 fn run_auto_low_power_tick(app: &AppHandle) {
     let Some(state) = app.try_state::<LifecycleState>() else {
         return;
     };
     let setting = settings::load_settings();
+
+    // M96 P3: 게임 신규 등장 시 기본 모드 자동 적용(auto_tray_on_game_minimize 게이트와 독립).
+    apply_default_mode_on_game_launch(app, &state, setting.default_mode);
+
     // M95: 기능 OFF면 비싼 창 열거(EnumWindows)/프로세스 스캔을 건너뛴다. 다음 ON 전환에서
     // 오탐 transition이 생기지 않도록 직전 visible 상태만 초기화하고 빠르게 반환한다.
     if !setting.auto_tray_on_game_minimize {
@@ -470,5 +519,23 @@ mod tests {
     fn start_minimized_arg_is_detected_for_autostart_tray_launch() {
         assert!(start_minimized_requested(["app.exe", "--minimized"]));
         assert!(!start_minimized_requested(["app.exe"]));
+    }
+
+    #[test]
+    fn default_mode_applies_only_when_game_newly_appears() {
+        use OptimizeMode::High;
+        // 게임이 없다가/첫 tick에 감지 → 적용
+        assert_eq!(
+            default_mode_action(Some(High), Some(false), true),
+            Some(High)
+        );
+        assert_eq!(default_mode_action(Some(High), None, true), Some(High));
+        // 연속 실행 중(이미 적용) → 재적용 안 함
+        assert_eq!(default_mode_action(Some(High), Some(true), true), None);
+        // 게임 종료 / 미실행 → 적용 안 함
+        assert_eq!(default_mode_action(Some(High), Some(true), false), None);
+        assert_eq!(default_mode_action(Some(High), None, false), None);
+        // default_mode 없음(수동) → 적용 안 함
+        assert_eq!(default_mode_action(None, Some(false), true), None);
     }
 }
