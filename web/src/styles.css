@@ -22,7 +22,8 @@
   --info: #8aa6ff;
   color: var(--txt);
   background: #06080f;
-  font-family: "Segoe UI", "Malgun Gothic", "Nanum Gothic", system-ui, sans-serif;
+  font-family: "Pretendard Variable", "Pretendard", "Segoe UI", "Malgun Gothic", system-ui,
+    sans-serif;
 }
 
 body[data-mode="light"] {
@@ -79,6 +80,13 @@ button {
 button:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+/* M96 P5: lucide 라인 아이콘 stroke를 글래스 톤에 맞춰 1.75로 통일(기본 2).
+   CSS가 lucide svg의 인라인 stroke-width=2 presentation attribute보다 우선한다.
+   데이터 그래프(.graph-svg path)는 .lucide가 아니므로 영향받지 않는다. */
+.lucide {
+  stroke-width: 1.75;
 }
 
 .bg-stage {
@@ -398,7 +406,8 @@ body.native-app-surface .app-window {
   place-items: center;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   box-shadow: 0 6px 18px -6px var(--accent), inset 0 1px 0 rgba(255, 255, 255, 0.5);
-  color: #04181b;
+  /* M96 P5: 앱/트레이 아이콘과 동일하게 흰색 Bolt로 통일. */
+  color: #ffffff;
   flex: 0 0 auto;
 }
 
@@ -595,6 +604,14 @@ body.native-app-surface .app-window {
   transform: translateY(-2px);
 }
 
+/* M96: 상태 카드 제목 왼쪽 점(원본 .design 누락분 복원). */
+.stat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 .stat-top {
   display: flex;
   align-items: center;
@@ -667,9 +684,8 @@ body.native-app-surface .app-window {
   height: 14px;
 }
 
-.section-label .help,
-.set-head .help {
-  margin-left: auto;
+.help {
+  position: relative;
   width: 18px;
   height: 18px;
   border: 1px solid var(--field-stroke);
@@ -681,13 +697,77 @@ body.native-app-surface .app-window {
   font-size: 11px;
   font-weight: 700;
   cursor: help;
+  flex: 0 0 auto;
 }
 
-.ctrl-tab .help:hover,
-.set-head .help:hover {
+.section-label .help,
+.set-head .help {
+  margin-left: auto;
+}
+
+.help:hover {
   color: var(--txt);
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* M96: ? 아이콘 hover/focus 시 즉시 뜨는 커스텀 툴팁(안 뜨던 네이티브 title 대체). */
+.help::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: auto;
+  z-index: 50;
+  width: max-content;
+  max-width: 240px;
+  padding: 8px 11px;
+  border: 1px solid var(--glass-stroke-hi);
+  border-radius: 10px;
+  background: var(--glass-fill-2);
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  box-shadow: var(--glass-shadow);
+  color: var(--txt);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: normal;
+  text-align: left;
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.help:hover::after,
+.help:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 오른쪽 끝(margin-left:auto)에 붙는 help(제어/설정 헤더)는 툴팁을 왼쪽으로 펼쳐 잘림 방지.
+   M96 P4: 모니터 헤더의 Help는 제목 옆(왼쪽)으로 옮겨졌으므로 기본 left 정렬을 쓴다. */
+.section-label .help::after,
+.set-head .help::after {
+  left: auto;
+  right: 0;
+}
+
+/* M96: 콘텐츠 전환(단발/매주, 그래프/코어별) 시 부드러운 fade-in. */
+.swap-in {
+  animation: swapIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes swapIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .panel-sub {
@@ -857,6 +937,176 @@ body[data-mode="light"] .gsel-menu {
   flex-shrink: 0;
 }
 
+/* M96 P4: 커스텀 글래스 날짜 선택기(네이티브 <input type=date> 대체).
+   트리거 버튼 높이를 day-grid(요일 박스)와 통일하고, 팝업은 GlassSelect와 동일한 fixed glass menu 패턴. */
+.gcal {
+  position: relative;
+}
+
+.gcal-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gcal-btn > svg:first-child {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+.gcal-val {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.gcal-chev {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease;
+}
+
+.gcal-btn.open {
+  border-color: var(--accent);
+}
+
+.gcal-btn.open .gcal-chev {
+  transform: rotate(180deg);
+  opacity: 0.85;
+}
+
+.gcal-pop {
+  position: fixed;
+  z-index: 1200;
+  width: 288px;
+  padding: 12px;
+  border: 1px solid var(--glass-stroke-hi);
+  border-radius: 16px;
+  backdrop-filter: blur(26px) saturate(170%);
+  -webkit-backdrop-filter: blur(26px) saturate(170%);
+  box-shadow: 0 24px 56px -16px rgba(0, 0, 0, 0.5), var(--inner-glow);
+  animation: gselIn 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+body[data-mode="dark"] .gcal-pop {
+  background: linear-gradient(170deg, rgba(16, 23, 33, 0.88), rgba(12, 17, 27, 0.84));
+}
+
+body[data-mode="light"] .gcal-pop {
+  background: linear-gradient(170deg, rgba(255, 255, 255, 0.92), rgba(246, 250, 253, 0.86));
+  border-color: rgba(21, 37, 43, 0.12);
+  box-shadow: 0 24px 56px -18px rgba(31, 56, 64, 0.32);
+}
+
+body.reduce-motion .gcal-pop {
+  animation: none;
+}
+
+.gcal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.gcal-title {
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.gcal-nav {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--field-stroke);
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: var(--field-fill);
+  color: var(--txt-dim);
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.gcal-nav:hover {
+  color: var(--txt);
+  background: var(--glass-fill-2);
+}
+
+.gcal-nav svg {
+  width: 15px;
+  height: 15px;
+}
+
+.gcal-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.gcal-wd {
+  display: grid;
+  place-items: center;
+  height: 26px;
+  color: var(--txt-faint);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.gcal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.gcal-empty {
+  height: 34px;
+}
+
+.gcal-day {
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--txt);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.gcal-day:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.gcal-day.today {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.gcal-day.sel {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #04181b;
+}
+
+body[data-mode="light"] .gcal-day.sel {
+  color: #042022;
+}
+
 .path-field {
   display: flex;
   align-items: center;
@@ -956,6 +1206,19 @@ body[data-mode="light"] .gsel-menu {
   box-shadow: 0 12px 28px -10px var(--accent), inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
+/* M96: 액센트 버튼 hover는 회색 유리(.btn:hover) 대신 액센트를 밝힌 gradient로.
+   var(--accent) 기반이라 액센트 색이 바뀌면 hover 색도 함께 어울리게 바뀐다. */
+.btn-primary:hover:not(:disabled),
+.btn.primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 82%, #fff),
+    color-mix(in srgb, var(--accent-2) 82%, #fff)
+  );
+  box-shadow: 0 16px 34px -10px var(--accent), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
 .btn-warn,
 .btn.warn {
   border: 0;
@@ -1011,11 +1274,43 @@ body[data-mode="light"] .gsel-menu {
 }
 
 .seg-btn.on {
-  border-color: rgba(37, 208, 192, 0.6);
+  /* M96 P4: active 버튼을 인접 형제 위로 올려, 위로 튀어나온 '적용 중' 뱃지가 옆 버튼에 가리지 않게 한다. */
+  z-index: 1;
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
   background:
-    linear-gradient(135deg, rgba(37, 208, 192, 0.28), rgba(24, 164, 224, 0.2)),
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent) 30%, transparent),
+      color-mix(in srgb, var(--accent-2) 22%, transparent)
+    ),
     var(--field-fill);
   box-shadow: 0 10px 26px -12px var(--accent), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+/* M96: 숨쉬는 glow를 box-shadow 애니(끊김) 대신 ::after의 opacity 펄스로 처리해 매끄럽게.
+   reduce-motion에서는 전역 규칙으로 애니 정지(은은한 정적 glow 유지). */
+.seg-btn.on::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0.5;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent),
+    0 14px 40px -10px var(--accent);
+  animation: segBreathe 2.8s ease-in-out infinite;
+}
+
+@keyframes segBreathe {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .seg-btn.on .ico {
@@ -1027,6 +1322,8 @@ body[data-mode="light"] .gsel-menu {
   position: absolute;
   top: -8px;
   right: 50%;
+  /* M96 P4: 숨쉬는 glow(.seg-btn.on::after, z-index:0)보다 위로 올려 뱃지가 가리지 않게 한다. */
+  z-index: 3;
   transform: translateX(50%);
   padding: 3px 9px;
   border-radius: 20px;
@@ -1036,6 +1333,19 @@ body[data-mode="light"] .gsel-menu {
   font-size: 9.5px;
   font-weight: 700;
   white-space: nowrap;
+  animation: badgePop 0.44s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* M96: 원본 .design와 동일한 badgePop(아래서 위로 스프링 팝). translateX(50%) 중앙정렬 유지. */
+@keyframes badgePop {
+  from {
+    opacity: 0;
+    transform: translateX(50%) translateY(5px) scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(50%) translateY(0) scale(1);
+  }
 }
 
 .legend {
@@ -1097,18 +1407,17 @@ body[data-mode="light"] .gsel-menu {
   opacity: 0.85;
 }
 
+/* M96: 원본 .design와 동일한 grid-template-rows 0fr→1fr 부드러운 펼침 애니메이션.
+   (이전 height:auto 방식은 트랜지션이 안 걸려 갑자기 열렸다.) */
 .acc-body {
-  display: block;
-  height: 0;
+  display: grid;
+  grid-template-rows: 0fr;
   overflow: hidden;
-  opacity: 0;
-  transition: opacity 0.22s ease;
+  transition: grid-template-rows 0.36s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .acc-body.open {
-  height: auto;
-  overflow: visible;
-  opacity: 1;
+  grid-template-rows: 1fr;
 }
 
 .acc-inner {
@@ -1116,8 +1425,8 @@ body[data-mode="light"] .gsel-menu {
   min-height: 0;
 }
 
-.acc-body.open .acc-inner {
-  overflow: visible;
+body.reduce-motion .acc-body {
+  transition: none;
 }
 
 .acc-pad {
@@ -1416,12 +1725,13 @@ body[data-mode="light"] .gsel-menu {
   font-size: 12.5px;
 }
 
+/* M96 P4: panel-head(모니터 헤더) 안에서 헤더 높이를 키워 제목을 처지게 하던
+   기본 margin-bottom 제거. 세로 여백이 필요한 곳(스케줄 탭)은 inline marginBottom으로 지정한다. */
 .pillswitch {
   position: relative;
   display: flex;
   gap: 4px;
   padding: 4px;
-  margin-bottom: 14px;
   border: 1px solid var(--field-stroke);
   border-radius: 13px;
   background: var(--field-fill);
@@ -1647,18 +1957,20 @@ body[data-mode="light"] .gsel-menu {
   font-size: 9.5px;
 }
 
+/* M96 P4: 원본 .design와 동일한 4열 그리드(2열로 이식돼 셀이 2배 넓던 회귀 수정). */
 .core-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .core-cell {
   min-width: 0;
   border: 1px solid var(--field-stroke);
-  border-radius: 12px;
-  padding: 11px 12px;
-  background: var(--glass-fill-2);
+  border-radius: 11px;
+  padding: 9px;
+  background: var(--field-fill);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
@@ -1666,24 +1978,25 @@ body[data-mode="light"] .gsel-menu {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--field-stroke));
 }
 
+/* M96 P4: 4열 셀에 맞춰 원본 컴팩트 사이즈로(ci 9px/600, cv 14px/700, bar 4px). */
 .ci {
   color: var(--txt-faint);
-  font-size: 9.5px;
-  font-weight: 800;
+  font-size: 9px;
+  font-weight: 600;
 }
 
 .cv {
-  margin-top: 4px;
-  font-size: 20px;
-  font-weight: 800;
+  margin-top: 3px;
+  font-size: 14px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
 .core-bar {
-  height: 5px;
-  margin-top: 8px;
-  border-radius: 99px;
-  background: color-mix(in srgb, var(--txt) 10%, transparent);
+  height: 4px;
+  margin-top: 7px;
+  border-radius: 2px;
+  background: var(--field-stroke);
   overflow: hidden;
 }
 
@@ -1692,7 +2005,7 @@ body[data-mode="light"] .gsel-menu {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  transition: width 0.35s ease;
+  transition: width 0.6s ease;
 }
 
 .settings-panel {
@@ -1900,9 +2213,15 @@ body[data-mode="light"] .accent-swatch {
   position: relative;
   overflow: hidden;
   flex: 0 0 auto;
-  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+  transition: border-color 0.4s ease, box-shadow 0.4s ease;
 }
 
+.switch:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--field-stroke));
+}
+
+/* M96: fill(::before)과 knob(i)을 둘 다 0.5s 스프링으로 동기화(원본 .design).
+   기존 0.35/0.25 불일치로 색·이동 속도가 어긋나던 문제 해결. */
 .switch::before {
   content: "";
   position: absolute;
@@ -1912,7 +2231,7 @@ body[data-mode="light"] .accent-swatch {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   transform: scaleX(0);
   transform-origin: left center;
-  transition: transform 0.35s ease;
+  transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .switch i {
@@ -1924,12 +2243,16 @@ body[data-mode="light"] .accent-swatch {
   height: 21px;
   border-radius: 50%;
   background: var(--txt-dim);
-  transition: transform 0.35s ease, background 0.25s ease;
+  transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.4s ease;
 }
 
 .switch.on {
   border-color: transparent;
   box-shadow: 0 5px 16px -6px var(--accent);
+}
+
+.switch.on:hover {
+  filter: brightness(1.08);
 }
 
 .switch.on::before {
