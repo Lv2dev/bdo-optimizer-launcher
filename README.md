@@ -57,7 +57,7 @@ Get-Content .\SHA256SUMS.txt
 | **단일 인스턴스** | Named Mutex로 중복 실행 차단, 두 번째 실행은 기존 창 포그라운드 |
 | **자동 시작** | 작업 스케줄러 로그온 트리거(UAC 프롬프트 없이 승격). 사용자 쓰기 가능성이 높은 위치의 .exe는 등록 거부. 트레이 시작 옵션 가능 |
 | **업데이트 알림** | 설정 탭에서 GitHub Release 최신 버전을 확인하고, 새 버전이 있으면 릴리스 페이지를 엽니다. 실행 파일 자동 교체는 하지 않습니다 |
-| **자원 모니터링** | 검은사막 프로세스의 CPU/메모리/GPU/VRAM/FPS 실시간 + 코어별 사용률 |
+| **자원 모니터링** | 검은사막 프로세스의 CPU/메모리/GPU/VRAM/Disk I/O/FPS 실시간 + 코어별 사용률 (갱신 주기 0.5/1/2초 선택) |
 | **테마** | 라이트/다크/Windows 자동 (OS 설정 추종) |
 | **접근성** | Tab 키 순회, Ctrl+1~4 탭 단축키, ESC 캘린더 dismiss, 주요 커스텀 컨트롤의 키보드 활성화 |
 
@@ -94,7 +94,7 @@ AMD CPU 및 구형 Intel CPU(11세대 이하)는 기존 로직(짝수 비트/전
 - 다른 ETW 도구(PresentMon 등)가 동시 실행 중이면 세션 충돌. 다른 도구 종료 후 재시도.
 
 ### 폰트가 깨져 보임
-나눔고딕이 .exe에 임베드되어 있어 별도 폰트 설치 없이 동작합니다. 그래도 일부 글리프(이모지)는 OS fallback에 의존합니다.
+Pretendard가 .exe에 임베드되어 있어 별도 폰트 설치 없이 동작합니다. 그래도 일부 글리프(이모지)는 OS fallback에 의존합니다.
 
 ### 트레이 아이콘이 표시되지 않음
 시스템 트레이 알림 영역에서 "숨겨진 아이콘 표시"를 확인. Windows 설정 → 개인 설정 → 작업 표시줄에서 본 앱 아이콘을 "항상 표시"로 설정 권장.
@@ -139,10 +139,10 @@ bdo-optimizer-launcher.exe
 - **테스트**: `cargo test --all-targets --locked`
 - **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps --locked -- -D warnings` / `npm run check:design-parity` / `npm run build`
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`, `release.yml`)
-- **라이센스**: 본 저장소 LICENSE 파일 참고. 임베드 폰트(나눔고딕)는 SIL Open Font License 1.1.
+- **라이센스**: 본 저장소 LICENSE 파일 참고. 임베드 폰트(Pretendard)는 SIL Open Font License 1.1.
 
 ---
 
 ## 변경 이력
 
-마일스톤별 변경 이력은 `.ai/memory/plan.md` (개발자용)를 참고하세요.
+변경 이력은 GitHub의 [Releases](../../releases)와 커밋 히스토리를 참고하세요.
