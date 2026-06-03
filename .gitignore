@@ -4,6 +4,7 @@
 # Tauri/Vite generated output
 /dist/
 /gen/
+/.vite/
 /node_modules/
 
 # AI/local assistant workspaces
