@@ -4,7 +4,11 @@
 # Tauri/Vite generated output
 /dist/
 /gen/
+/.vite/
 /node_modules/
+
+# Design mockups (local parity reference; product code lives in web/src)
+/.design/
 
 # AI/local assistant workspaces
 /.ai/

@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   Bolt,
+  CalendarDays,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   ExternalLink,
   Eye,
@@ -28,6 +32,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import "pretendard/dist/web/variable/pretendardvariable.css";
 import "./styles.css";
 
 const EMPTY_STATE = {
@@ -187,6 +192,29 @@ function todayValue() {
   const date = new Date();
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
   return date.toISOString().slice(0, 10);
+}
+
+const CAL_WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+
+function parseDateValue(value) {
+  const [year, month, day] = String(value || "")
+    .split("-")
+    .map((part) => Number.parseInt(part, 10));
+  if (!year || !month || !day) {
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth(), day: now.getDate() };
+  }
+  return { year, month: month - 1, day };
+}
+
+function formatDateValue(year, month, day) {
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function formatDateLabel(value) {
+  const { year, month, day } = parseDateValue(value);
+  const weekday = CAL_WEEKDAYS[new Date(year, month, day).getDay()];
+  return `${formatDateValue(year, month, day)} (${weekday})`;
 }
 
 function currentWeekdayToken() {
@@ -535,7 +563,7 @@ function mergePayload(previous, payload) {
 
 function Help({ tip }) {
   return (
-    <span className="help" role="img" aria-label={tip} title={tip}>
+    <span className="help" role="img" aria-label={tip} data-tip={tip}>
       ?
     </span>
   );
@@ -544,6 +572,7 @@ function Help({ tip }) {
 function GlassSelect({ value, options, onChange, width }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
+  const menuRef = useRef(null);
   const [menuStyle, setMenuStyle] = useState({});
 
   const items = options.map((option) =>
@@ -556,12 +585,27 @@ function GlassSelect({ value, options, onChange, width }) {
       return undefined;
     }
     const close = (event) => {
-      if (!rootRef.current?.contains(event.target)) {
+      if (rootRef.current?.contains(event.target) || menuRef.current?.contains(event.target)) {
+        return;
+      }
+      setOpen(false);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") {
         setOpen(false);
       }
     };
+    const onScroll = () => setOpen(false);
     document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    };
   }, [open]);
 
   useLayoutEffect(() => {
@@ -577,16 +621,7 @@ function GlassSelect({ value, options, onChange, width }) {
   }, [open, width]);
 
   return (
-    <div
-      className="gsel"
-      ref={rootRef}
-      style={{ width }}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          setOpen(false);
-        }
-      }}
-    >
+    <div className="gsel" ref={rootRef} style={{ width }}>
       <button
         type="button"
         className={`field gsel-btn${open ? " open" : ""}`}
@@ -597,26 +632,170 @@ function GlassSelect({ value, options, onChange, width }) {
         <span className="gsel-val">{selected?.label ?? value}</span>
         <ChevronDown className="gsel-chev" aria-hidden="true" />
       </button>
-      {open ? (
-        <div className="gsel-menu" style={menuStyle} role="listbox">
-          {items.map((item) => (
-            <button
-              type="button"
-              key={item.value}
-              role="option"
-              aria-selected={item.value === value}
-              className={`gsel-opt${item.value === value ? " on" : ""}`}
-              onClick={() => {
-                onChange(item.value);
-                setOpen(false);
-              }}
-            >
-              <span>{item.label}</span>
-              {item.value === value ? <Check aria-hidden="true" /> : null}
-            </button>
-          ))}
-        </div>
-      ) : null}
+      {open
+        ? createPortal(
+            <div className="gsel-menu" ref={menuRef} style={menuStyle} role="listbox">
+              {items.map((item) => (
+                <button
+                  type="button"
+                  key={item.value}
+                  role="option"
+                  aria-selected={item.value === value}
+                  className={`gsel-opt${item.value === value ? " on" : ""}`}
+                  onClick={() => {
+                    onChange(item.value);
+                    setOpen(false);
+                  }}
+                >
+                  <span>{item.label}</span>
+                  {item.value === value ? <Check aria-hidden="true" /> : null}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
+  );
+}
+
+function GlassDatePicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const popRef = useRef(null);
+  const [menuStyle, setMenuStyle] = useState({});
+  const selected = parseDateValue(value);
+  const [view, setView] = useState({ year: selected.year, month: selected.month });
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+    const close = (event) => {
+      if (rootRef.current?.contains(event.target) || popRef.current?.contains(event.target)) {
+        return;
+      }
+      setOpen(false);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    const onScroll = () => setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !rootRef.current) {
+      return;
+    }
+    const rect = rootRef.current.getBoundingClientRect();
+    setMenuStyle({ left: rect.left, top: rect.bottom + 6 });
+  }, [open]);
+
+  const openCalendar = () => {
+    setView({ year: selected.year, month: selected.month });
+    setOpen(true);
+  };
+
+  const firstWeekday = new Date(view.year, view.month, 1).getDay();
+  const daysInMonth = new Date(view.year, view.month + 1, 0).getDate();
+  const today = new Date();
+  const cells = [];
+  for (let index = 0; index < firstWeekday; index += 1) {
+    cells.push(null);
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    cells.push(day);
+  }
+
+  const goPrev = () =>
+    setView((current) =>
+      current.month === 0
+        ? { year: current.year - 1, month: 11 }
+        : { year: current.year, month: current.month - 1 },
+    );
+  const goNext = () =>
+    setView((current) =>
+      current.month === 11
+        ? { year: current.year + 1, month: 0 }
+        : { year: current.year, month: current.month + 1 },
+    );
+  const pick = (day) => {
+    onChange(formatDateValue(view.year, view.month, day));
+    setOpen(false);
+  };
+
+  const isSelected = (day) =>
+    selected.year === view.year && selected.month === view.month && selected.day === day;
+  const isToday = (day) =>
+    today.getFullYear() === view.year && today.getMonth() === view.month && today.getDate() === day;
+
+  return (
+    <div className="gcal" ref={rootRef}>
+      <button
+        type="button"
+        className={`field gcal-btn${open ? " open" : ""}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => (open ? setOpen(false) : openCalendar())}
+      >
+        <CalendarDays aria-hidden="true" />
+        <span className="gcal-val">{formatDateLabel(value)}</span>
+        <ChevronDown className="gcal-chev" aria-hidden="true" />
+      </button>
+      {open
+        ? createPortal(
+            <div className="gcal-pop" ref={popRef} style={menuStyle} role="dialog" aria-label="날짜 선택">
+              <div className="gcal-head">
+                <button type="button" className="gcal-nav" aria-label="이전 달" onClick={goPrev}>
+                  <ChevronLeft aria-hidden="true" />
+                </button>
+                <span className="gcal-title">
+                  {view.year}년 {view.month + 1}월
+                </span>
+                <button type="button" className="gcal-nav" aria-label="다음 달" onClick={goNext}>
+                  <ChevronRight aria-hidden="true" />
+                </button>
+              </div>
+              <div className="gcal-week">
+                {CAL_WEEKDAYS.map((label) => (
+                  <span key={label} className="gcal-wd">
+                    {label}
+                  </span>
+                ))}
+              </div>
+              <div className="gcal-grid">
+                {cells.map((day, index) =>
+                  day === null ? (
+                    <span key={`empty-${index}`} className="gcal-empty" />
+                  ) : (
+                    <button
+                      type="button"
+                      key={day}
+                      className={`gcal-day${isSelected(day) ? " sel" : ""}${isToday(day) ? " today" : ""}`}
+                      aria-pressed={isSelected(day)}
+                      onClick={() => pick(day)}
+                    >
+                      {day}
+                    </button>
+                  ),
+                )}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
@@ -781,7 +960,7 @@ function ControlTab({
         <div className="section-label">
           <Play aria-hidden="true" />
           Game
-          <Help tip="런처 실행과 프로세스 상태를 관리합니다" />
+          <Help tip="검은사막 런처를 실행하고, 게임이 켜져 있는지 한눈에 확인할 수 있어요." />
         </div>
         <p className="panel-sub">런처 실행과 프로세스 상태를 관리합니다.</p>
         <div className="row">
@@ -800,7 +979,7 @@ function ControlTab({
         <div className="section-label">
           <Gauge aria-hidden="true" />
           Mode
-          <Help tip="우선순위와 CPU affinity를 즉시 적용합니다" />
+          <Help tip="선택한 모드로 BlackDesert64.exe의 우선순위와 사용 CPU 코어를 바로 조정해요." />
         </div>
         <p className="panel-sub">BlackDesert64.exe 우선순위와 CPU affinity를 즉시 적용합니다.</p>
         <div className="seg" role="group" aria-label="최적화 모드">
@@ -908,12 +1087,13 @@ function ScheduleTab({ state, pending, runCommand }) {
         >
           <Repeat aria-hidden="true" />
           <h3>자동 모드 전환</h3>
+          <Help tip="앱이 켜져 있는 동안, 정해둔 시간대가 되면 자동으로 성능 모드를 바꿔줘요." />
           <span className="chip" style={{ marginLeft: "auto" }}>
             {state.schedule.empty ? "규칙 없음" : `${state.schedule.rules.length}개 활성`}
           </span>
           <ChevronDown className="acc-chev" aria-hidden="true" />
         </button>
-        <div className={`acc-body${openAuto ? " open" : ""}`} style={{ height: openAuto ? "auto" : 0 }}>
+        <div className={`acc-body${openAuto ? " open" : ""}`}>
           <div className="acc-inner">
             <div style={{ paddingTop: 14 }}>
               <p className="panel-sub" style={{ marginBottom: 14 }}>
@@ -938,7 +1118,7 @@ function ScheduleTab({ state, pending, runCommand }) {
                   ]}
                 />
                 {kind === "specific_date" ? (
-                  <input className="field" type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+                  <GlassDatePicker value={date} onChange={setDate} />
                 ) : null}
                 <div className="row">
                   <input
@@ -1026,12 +1206,13 @@ function ScheduleTab({ state, pending, runCommand }) {
         >
           <Power aria-hidden="true" />
           <h3>PC 예약 종료</h3>
-          <span className="chip warn" style={{ marginLeft: "auto" }}>
-            전원 차단
+          <Help tip="정해둔 시각이 되면 PC를 자동으로 종료해요. 게임을 켜두고 자리를 비울 때 좋아요." />
+          <span className={`chip${shutdownActive ? " accent" : ""}`} style={{ marginLeft: "auto" }}>
+            {shutdownActive ? "예약 있음" : "예약 없음"}
           </span>
           <ChevronDown className="acc-chev" aria-hidden="true" />
         </button>
-        <div className={`acc-body${openRes ? " open" : ""}`} style={{ height: openRes ? "auto" : 0 }}>
+        <div className={`acc-body${openRes ? " open" : ""}`}>
           <div className="acc-inner">
             <div style={{ paddingTop: 14 }}>
               {shutdownActive ? (
@@ -1055,15 +1236,11 @@ function ScheduleTab({ state, pending, runCommand }) {
               />
 
               {shutdownKind === "once" ? (
-                <input
-                  className="field"
-                  type="date"
-                  value={shutdownDate}
-                  onChange={(event) => setShutdownDate(event.target.value)}
-                  style={{ marginBottom: 16 }}
-                />
+                <div key="once" className="swap-in" style={{ marginBottom: 16 }}>
+                  <GlassDatePicker value={shutdownDate} onChange={setShutdownDate} />
+                </div>
               ) : (
-                <div className="day-grid" style={{ marginBottom: 16 }}>
+                <div key="weekly" className="day-grid swap-in" style={{ marginBottom: 16 }}>
                   {WEEKDAYS.map(([token, label]) => (
                     <button
                       type="button"
@@ -1106,7 +1283,7 @@ function ScheduleTab({ state, pending, runCommand }) {
               </div>
 
               <div className="row">
-                <button type="button" className="btn btn-warn" disabled={!canRunCommand} onClick={submitShutdown}>
+                <button type="button" className="btn btn-primary" disabled={!canRunCommand} onClick={submitShutdown}>
                   <Check aria-hidden="true" /> 예약 등록
                 </button>
                 <button type="button" className="btn" disabled={!canRunCommand || !shutdownActive} onClick={cancelShutdown}>
@@ -1280,6 +1457,7 @@ function MonitorTab({ state }) {
         <div className="panel-head">
           <Sparkles aria-hidden="true" style={{ color: "var(--accent-3)" }} />
           <h3>검은사막 자원 모니터</h3>
+          <Help tip="검은사막이 지금 쓰고 있는 CPU·GPU·메모리·FPS를 1초마다 실시간으로 보여줘요." />
           <PillSwitch
             value={view}
             onChange={setView}
@@ -1293,7 +1471,7 @@ function MonitorTab({ state }) {
         <p className="panel-sub">{monitor.statusText || "모니터 샘플 대기 중."}</p>
 
         {view === "bars" ? (
-          <div className="monitor-graphs">
+          <div key="bars" className="monitor-graphs swap-in">
             <LiveGraph
               name="CPU"
               color="#3fd0ff"
@@ -1324,7 +1502,7 @@ function MonitorTab({ state }) {
             />
           </div>
         ) : (
-          <div>
+          <div key="cores" className="swap-in">
             {cores.length === 0 ? (
               <p className="empty">코어 샘플 대기 중입니다.</p>
             ) : (
@@ -1721,6 +1899,12 @@ function App() {
   useEffect(() => {
     runCommand("init", "get_app_state", undefined, false);
   }, [runCommand]);
+
+  useEffect(() => {
+    const blockContextMenu = (event) => event.preventDefault();
+    document.addEventListener("contextmenu", blockContextMenu);
+    return () => document.removeEventListener("contextmenu", blockContextMenu);
+  }, []);
 
   useLayoutEffect(() => {
     recalcTabPill();
