@@ -295,6 +295,16 @@ fn validate_time(time: &str) -> Result<(), Error> {
             "시간 형식이 올바르지 않습니다. 예: 23:30".into(),
         ));
     }
+    // parse::<u32>()가 "+9"를 9로 받아들이므로('+' 수용), 숫자만 허용해 거부한다("+9:30").
+    if !parts[0]
+        .bytes()
+        .chain(parts[1].bytes())
+        .all(|c| c.is_ascii_digit())
+    {
+        return Err(Error::InvalidInput(
+            "시간 형식이 올바르지 않습니다. 예: 23:30".into(),
+        ));
+    }
     let hour: u32 = parts[0]
         .parse()
         .map_err(|_| Error::InvalidInput("시 형식 오류.".into()))?;
@@ -312,6 +322,14 @@ fn validate_time(time: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_time_rejects_sign_prefix() {
+        assert!(validate_time("23:30").is_ok());
+        assert!(validate_time("00:00").is_ok());
+        assert!(validate_time("+9:30").is_err()); // 부호 접두 거부
+        assert!(validate_time("12:+5").is_err());
+    }
 
     fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, mo, d, h, mi, 0).single().unwrap()

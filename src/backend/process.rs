@@ -328,11 +328,20 @@ pub(super) fn priority_class_to_mode(priority: u32) -> Option<super::schedule::O
     }
 }
 
+// 모드 적용(SetPriorityClass + SetProcessAffinityMask)은 2회로 분리된 Win32 호출이라,
+// UI/트레이/자동 워커/재적용 스레드가 동시에 호출하면 priority와 affinity가 서로 다른 모드로
+// 뒤섞인 혼합 상태로 남을 수 있다. 적용 전 구간을 직렬화해 원자적으로 만든다.
+// (apply_optimization은 재진입하지 않고 다른 전역 lock도 잡지 않아 데드락 위험이 없다.)
+static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn apply_optimization(
     pid: u32,
     affinity: usize,
     priority: PROCESS_CREATION_FLAGS,
 ) -> Result<(), Error> {
+    let _apply_guard = APPLY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         // PROCESS_QUERY_LIMITED_INFORMATION을 함께 요청해 이미지명 재확인 가능.
         // PID 재사용 TOCTOU로 무관한 elevated 프로세스를 조작하지 않도록 방어한다.
