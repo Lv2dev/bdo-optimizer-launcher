@@ -16,6 +16,7 @@ import {
   Eye,
   FolderOpen,
   Gauge,
+  Github,
   Laptop,
   Leaf,
   Monitor,
@@ -68,6 +69,8 @@ const EMPTY_STATE = {
     autostartEnabled: false,
     autostartMinimized: false,
     launcherPath: "",
+    defaultMode: null,
+    monitorIntervalMs: 1000,
   },
   update: {
     statusText: "업데이트 채널 미설정.",
@@ -415,6 +418,16 @@ function browserPreviewPayload(command, args) {
         ...previewSettings,
         launcherPath: input.stringValue ?? "",
       };
+    } else if (input.key === "default_mode") {
+      previewSettings = {
+        ...previewSettings,
+        defaultMode: input.defaultMode ?? null,
+      };
+    } else if (input.key === "monitor_interval") {
+      previewSettings = {
+        ...previewSettings,
+        monitorIntervalMs: input.intValue ?? 1000,
+      };
     } else {
       const map = {
         reduce_motion: "reduceMotion",
@@ -463,6 +476,12 @@ function browserPreviewPayload(command, args) {
         current: args.url ? "GitHub Release 페이지를 열었습니다." : "열 수 있는 릴리스 페이지가 없습니다.",
         previous: "",
       },
+    };
+  }
+
+  if (command === "open_repository") {
+    return {
+      status: { current: "GitHub 저장소를 엽니다. (미리보기)", previous: "" },
     };
   }
 
@@ -1543,6 +1562,8 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
         themeMode: null,
         boolValue: null,
         stringValue: null,
+        defaultMode: null,
+        intValue: null,
         ...values,
       },
     });
@@ -1724,6 +1745,49 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
 
       <section className="glass panel">
         <div className="set-head">
+          <Gauge aria-hidden="true" style={{ opacity: 0.7 }} />
+          최적화 기본값
+          <Help tip="게임 감지·모니터링 기본 동작" />
+        </div>
+        <div className="set-row" style={{ paddingTop: 4 }}>
+          <div className="meta">
+            <div className="t">기본 적용 모드</div>
+            <div className="d">검은사막 실행이 감지되면 자동으로 적용할 성능 모드입니다. ‘없음’이면 적용하지 않습니다.</div>
+          </div>
+          <GlassSelect
+            value={settings.defaultMode ?? "none"}
+            width={120}
+            options={[
+              { value: "none", label: "없음" },
+              { value: "high", label: "고성능" },
+              { value: "normal", label: "일반" },
+              { value: "low_power", label: "저전력" },
+            ]}
+            onChange={(value) =>
+              setSetting("default_mode", { defaultMode: value === "none" ? null : value })
+            }
+          />
+        </div>
+        <div className="set-row">
+          <div className="meta">
+            <div className="t">모니터 갱신 주기</div>
+            <div className="d">자원 그래프·코어 점유율 샘플링 간격입니다.</div>
+          </div>
+          <GlassSelect
+            value={String(settings.monitorIntervalMs ?? 1000)}
+            width={110}
+            options={[
+              { value: "500", label: "0.5초" },
+              { value: "1000", label: "1초" },
+              { value: "2000", label: "2초" },
+            ]}
+            onChange={(value) => setSetting("monitor_interval", { intValue: Number(value) })}
+          />
+        </div>
+      </section>
+
+      <section className="glass panel">
+        <div className="set-head">
           <FolderOpen aria-hidden="true" style={{ opacity: 0.7 }} />
           런처 경로
           <Help tip="검은사막 실행 파일 경로" />
@@ -1799,7 +1863,15 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
         </button>
       </section>
 
-      <div className="app-footer">bdo-optimizer-launcher v{state.appVersion}</div>
+      <button
+        type="button"
+        className="app-footer app-footer-link"
+        onClick={() => runCommand("open-repo", "open_repository")}
+        title="GitHub 저장소 열기"
+      >
+        <Github aria-hidden="true" />
+        bdo-optimizer-launcher v{state.appVersion}
+      </button>
     </main>
   );
 }
@@ -1947,7 +2019,9 @@ function App() {
     };
 
     pollMonitor();
-    const timer = window.setInterval(pollMonitor, 1000);
+    // M96 P3: 설정의 모니터 갱신 주기(500/1000/2000ms)를 폴링 간격에 적용.
+    const intervalMs = state.settings.monitorIntervalMs || 1000;
+    const timer = window.setInterval(pollMonitor, intervalMs);
     return () => {
       window.clearInterval(timer);
       // 모니터 탭을 벗어나면 백엔드 ETW FPS 세션을 능동적으로 중단한다.
@@ -1955,7 +2029,7 @@ function App() {
         invoke("stop_monitor_session").catch(() => {});
       }
     };
-  }, [activeTab, runCommand]);
+  }, [activeTab, runCommand, state.settings.monitorIntervalMs]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
