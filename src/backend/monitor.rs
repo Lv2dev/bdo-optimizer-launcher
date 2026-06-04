@@ -280,12 +280,18 @@ unsafe fn sample_affinity(handle: HANDLE) -> Option<usize> {
     Some(proc_mask)
 }
 
-// "0,0" / "0,1" / ... 형식의 instance name을 (group, cpu) 튜플로 파싱한다.
-fn parse_instance(name: &str) -> (u32, u32) {
-    let mut parts = name.split(',');
-    let g = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let c = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (g, c)
+// "0,0" / "0,1" / ... 형식의 instance name만 (group, cpu) 튜플로 파싱한다.
+// PDH는 "_Total"뿐 아니라 "0,_total" 같은 그룹 합계도 반환하므로 숫자 쌍만 코어로 인정한다.
+fn parse_instance(name: &str) -> Option<(u32, u32)> {
+    let (group, cpu) = name.split_once(',')?;
+    if group.is_empty()
+        || cpu.is_empty()
+        || !group.bytes().all(|b| b.is_ascii_digit())
+        || !cpu.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((group.parse().ok()?, cpu.parse().ok()?))
 }
 
 unsafe fn pwstr_to_string(p: PWSTR) -> String {
@@ -352,8 +358,9 @@ unsafe fn pdh_collect_per_core(counter: PdhCounter) -> Vec<f64> {
         if name == "_Total" {
             continue;
         }
-        let key = parse_instance(&name);
-        pairs.push((key, item.FmtValue.Anonymous.doubleValue));
+        if let Some(key) = parse_instance(&name) {
+            pairs.push((key, item.FmtValue.Anonymous.doubleValue));
+        }
     }
     pairs.sort_by_key(|a| a.0);
     pairs.into_iter().map(|(_, v)| v).collect()
@@ -406,12 +413,16 @@ mod tests {
 
     #[test]
     fn parse_instance_splits_group_and_cpu() {
-        assert_eq!(parse_instance("0,0"), (0, 0));
-        assert_eq!(parse_instance("0,5"), (0, 5));
-        assert_eq!(parse_instance("1,12"), (1, 12));
-        // 비정상/부분 입력은 0으로 폴백한다.
-        assert_eq!(parse_instance("_Total"), (0, 0));
-        assert_eq!(parse_instance(""), (0, 0));
-        assert_eq!(parse_instance("3"), (3, 0));
+        assert_eq!(parse_instance("0,0"), Some((0, 0)));
+        assert_eq!(parse_instance("0,5"), Some((0, 5)));
+        assert_eq!(parse_instance("1,12"), Some((1, 12)));
+    }
+
+    #[test]
+    fn parse_instance_rejects_total_and_partial_instances() {
+        assert_eq!(parse_instance("_Total"), None);
+        assert_eq!(parse_instance("0,_total"), None);
+        assert_eq!(parse_instance(""), None);
+        assert_eq!(parse_instance("3"), None);
     }
 }

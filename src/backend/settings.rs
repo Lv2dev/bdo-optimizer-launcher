@@ -27,9 +27,31 @@ fn default_true() -> bool {
     true
 }
 
+pub const UPDATE_CHECK_INTERVAL_6H_MS: u32 = 21_600_000;
+pub const UPDATE_CHECK_INTERVAL_12H_MS: u32 = 43_200_000;
+pub const UPDATE_CHECK_INTERVAL_1D_MS: u32 = 86_400_000;
+pub const UPDATE_CHECK_INTERVAL_3D_MS: u32 = 259_200_000;
+pub const UPDATE_CHECK_INTERVAL_7D_MS: u32 = 604_800_000;
+
+pub const UPDATE_CHECK_INTERVAL_OPTIONS_MS: [u32; 5] = [
+    UPDATE_CHECK_INTERVAL_6H_MS,
+    UPDATE_CHECK_INTERVAL_12H_MS,
+    UPDATE_CHECK_INTERVAL_1D_MS,
+    UPDATE_CHECK_INTERVAL_3D_MS,
+    UPDATE_CHECK_INTERVAL_7D_MS,
+];
+
 // M96 P3: 모니터 폴링 기본 간격(ms). 기존 고정값 1초와 동일하게 둔다.
 fn default_monitor_interval() -> u32 {
     1000
+}
+
+fn default_update_check_interval() -> u32 {
+    UPDATE_CHECK_INTERVAL_1D_MS
+}
+
+pub fn is_supported_update_check_interval_ms(ms: u32) -> bool {
+    UPDATE_CHECK_INTERVAL_OPTIONS_MS.contains(&ms)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -57,6 +79,14 @@ pub struct AppSettings {
     // M96 P3: 모니터 탭 자원 폴링 간격(ms). 허용값 500/1000/2000, 기본 1000.
     #[serde(default = "default_monitor_interval")]
     pub monitor_interval_ms: u32,
+    // M104: 자동 업데이트 알림. 기본 ON, 주기는 기본 하루.
+    #[serde(default = "default_true")]
+    pub update_alert_enabled: bool,
+    #[serde(default = "default_update_check_interval")]
+    pub update_check_interval_ms: u32,
+    // 같은 릴리스 버전을 반복 알림하지 않기 위한 마지막 알림 버전.
+    #[serde(default)]
+    pub last_update_notified_version: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -70,6 +100,9 @@ impl Default for AppSettings {
             last_user_mode: None,
             default_mode: None,
             monitor_interval_ms: 1000,
+            update_alert_enabled: true,
+            update_check_interval_ms: UPDATE_CHECK_INTERVAL_1D_MS,
+            last_update_notified_version: None,
         }
     }
 }
@@ -206,5 +239,34 @@ mod tests {
 
         assert_eq!(None, settings.default_mode);
         assert_eq!(1000, settings.monitor_interval_ms);
+    }
+
+    #[test]
+    fn app_settings_defaults_update_alert_to_daily_polling() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme_mode":"dark"}"#).unwrap();
+
+        assert!(settings.update_alert_enabled);
+        assert_eq!(86_400_000, settings.update_check_interval_ms);
+        assert_eq!(None, settings.last_update_notified_version);
+    }
+
+    #[test]
+    fn app_settings_round_trips_update_alert_fields() {
+        let settings = AppSettings {
+            update_alert_enabled: false,
+            update_check_interval_ms: 21_600_000,
+            last_update_notified_version: Some("0.1.2".to_string()),
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert!(!restored.update_alert_enabled);
+        assert_eq!(21_600_000, restored.update_check_interval_ms);
+        assert_eq!(
+            Some("0.1.2"),
+            restored.last_update_notified_version.as_deref()
+        );
     }
 }

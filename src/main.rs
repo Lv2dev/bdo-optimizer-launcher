@@ -22,6 +22,7 @@ fn main() {
             tauri_commands::set_setting,
             tauri_commands::open_log_folder,
             tauri_commands::check_for_updates,
+            tauri_commands::check_update_alert,
             tauri_commands::open_update_release,
             tauri_commands::open_repository,
             tauri_commands::refresh_game_status,

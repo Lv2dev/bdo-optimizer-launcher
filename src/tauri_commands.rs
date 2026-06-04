@@ -133,6 +133,8 @@ pub struct ShutdownStateDto {
     pub once_active: bool,
     pub weekly_text: String,
     pub weekly_active: bool,
+    pub weekly_days: Vec<WeekdayDto>,
+    pub weekly_time: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -173,6 +175,8 @@ pub struct SettingsStateDto {
     // M96 P3: 게임 감지 시 자동 적용할 기본 모드(None=없음/수동)와 모니터 폴링 간격(ms).
     pub default_mode: Option<ModeDto>,
     pub monitor_interval_ms: u32,
+    pub update_alert_enabled: bool,
+    pub update_check_interval_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -194,6 +198,8 @@ pub enum SettingKeyDto {
     LauncherPath,
     DefaultMode,
     MonitorInterval,
+    UpdateAlertEnabled,
+    UpdateCheckInterval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +222,7 @@ pub struct UpdateStateDto {
     pub checking: bool,
     pub release_url: String,
     pub app_version: String,
+    pub latest_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -223,6 +230,15 @@ pub struct UpdateStateDto {
 pub struct UpdateCommandResponseDto {
     pub status: StatusDto,
     pub update: UpdateStateDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAlertCommandResponseDto {
+    pub status: StatusDto,
+    pub update: UpdateStateDto,
+    pub should_alert: bool,
+    pub alert_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -441,6 +457,13 @@ fn settings_state(
     autostart_enabled: bool,
     autostart_minimized: bool,
 ) -> SettingsStateDto {
+    let update_check_interval_ms =
+        if settings::is_supported_update_check_interval_ms(loaded.update_check_interval_ms) {
+            loaded.update_check_interval_ms
+        } else {
+            settings::UPDATE_CHECK_INTERVAL_1D_MS
+        };
+
     SettingsStateDto {
         theme_mode: ThemeModeDto::from(loaded.theme_mode),
         effective_dark: settings::resolve_dark_mode(loaded.theme_mode),
@@ -452,6 +475,8 @@ fn settings_state(
         launcher_path: loaded.launcher_path,
         default_mode: loaded.default_mode.map(ModeDto::from),
         monitor_interval_ms: loaded.monitor_interval_ms,
+        update_alert_enabled: loaded.update_alert_enabled,
+        update_check_interval_ms,
     }
 }
 
@@ -468,6 +493,8 @@ fn settings_state_for_test() -> SettingsStateDto {
         launcher_path: String::new(),
         default_mode: None,
         monitor_interval_ms: 1000,
+        update_alert_enabled: true,
+        update_check_interval_ms: settings::UPDATE_CHECK_INTERVAL_1D_MS,
     }
 }
 
@@ -499,6 +526,7 @@ fn initial_update_state() -> UpdateStateDto {
         false,
         String::new(),
         env!("APP_VERSION").to_string(),
+        None,
     )
 }
 
@@ -508,6 +536,7 @@ fn update_state(
     checking: bool,
     release_url: String,
     app_version: String,
+    latest_version: Option<String>,
 ) -> UpdateStateDto {
     UpdateStateDto {
         status_text,
@@ -515,6 +544,7 @@ fn update_state(
         checking,
         release_url,
         app_version,
+        latest_version,
     }
 }
 
@@ -525,8 +555,16 @@ fn update_state_for_test(
     checking: bool,
     release_url: String,
     app_version: String,
+    latest_version: Option<String>,
 ) -> UpdateStateDto {
-    update_state(status_text, available, checking, release_url, app_version)
+    update_state(
+        status_text,
+        available,
+        checking,
+        release_url,
+        app_version,
+        latest_version,
+    )
 }
 
 fn update_state_from_check(check: update::UpdateCheck) -> UpdateStateDto {
@@ -536,6 +574,7 @@ fn update_state_from_check(check: update::UpdateCheck) -> UpdateStateDto {
         false,
         check.release_url,
         env!("APP_VERSION").to_string(),
+        Some(check.latest_version),
     )
 }
 
@@ -547,6 +586,39 @@ fn update_command_response(
         status: status(current),
         update,
     }
+}
+
+fn update_alert_command_response(
+    current: impl Into<String>,
+    update: UpdateStateDto,
+    should_alert: bool,
+    alert_text: String,
+) -> UpdateAlertCommandResponseDto {
+    UpdateAlertCommandResponseDto {
+        status: status(current),
+        update,
+        should_alert,
+        alert_text,
+    }
+}
+
+fn should_alert_for_update(
+    update_available: bool,
+    latest_version: &str,
+    last_notified_version: Option<&str>,
+) -> bool {
+    update_available
+        && !latest_version.trim().is_empty()
+        && last_notified_version != Some(latest_version)
+}
+
+#[cfg(test)]
+fn should_alert_for_update_for_test(
+    update_available: bool,
+    latest_version: &str,
+    last_notified_version: Option<&str>,
+) -> bool {
+    should_alert_for_update(update_available, latest_version, last_notified_version)
 }
 
 fn monitor_runtime() -> &'static Mutex<MonitorRuntime> {
@@ -851,7 +923,8 @@ fn validate_setting_input(input: &SettingInputDto) -> Result<(), String> {
         | SettingKeyDto::AutoTrayOnGameMinimize
         | SettingKeyDto::CloseToTray
         | SettingKeyDto::AutostartEnabled
-        | SettingKeyDto::AutostartMinimized => input
+        | SettingKeyDto::AutostartMinimized
+        | SettingKeyDto::UpdateAlertEnabled => input
             .bool_value
             .map(|_| ())
             .ok_or_else(|| "boolValue 값을 입력하세요.".to_string()),
@@ -860,6 +933,10 @@ fn validate_setting_input(input: &SettingInputDto) -> Result<(), String> {
         SettingKeyDto::MonitorInterval => match input.int_value {
             Some(500) | Some(1000) | Some(2000) => Ok(()),
             _ => Err("모니터 갱신 주기는 500/1000/2000(ms)만 허용합니다.".to_string()),
+        },
+        SettingKeyDto::UpdateCheckInterval => match input.int_value {
+            Some(ms) if settings::is_supported_update_check_interval_ms(ms) => Ok(()),
+            _ => Err("업데이트 확인 주기는 6시간/12시간/하루/3일/일주일만 허용합니다.".to_string()),
         },
     }
 }
@@ -993,12 +1070,16 @@ fn shutdown_state(
     once_active: bool,
     weekly_text: String,
     weekly_active: bool,
+    weekly_days: Vec<WeekdayDto>,
+    weekly_time: Option<String>,
 ) -> ShutdownStateDto {
     ShutdownStateDto {
         once_text,
         once_active,
         weekly_text,
         weekly_active,
+        weekly_days,
+        weekly_time,
     }
 }
 
@@ -1008,8 +1089,17 @@ fn shutdown_state_for_test(
     once_active: bool,
     weekly_text: String,
     weekly_active: bool,
+    weekly_days: Vec<WeekdayDto>,
+    weekly_time: Option<String>,
 ) -> ShutdownStateDto {
-    shutdown_state(once_text, once_active, weekly_text, weekly_active)
+    shutdown_state(
+        once_text,
+        once_active,
+        weekly_text,
+        weekly_active,
+        weekly_days,
+        weekly_time,
+    )
 }
 
 fn fmt_absolute(dt: DateTime<Local>) -> String {
@@ -1074,6 +1164,19 @@ fn fmt_weekly(info: &shutdown::WeeklyInfo, now: DateTime<Local>) -> String {
     )
 }
 
+fn weekday_dto_from_code(day: &str) -> Option<WeekdayDto> {
+    match day {
+        "MON" => Some(WeekdayDto::Mon),
+        "TUE" => Some(WeekdayDto::Tue),
+        "WED" => Some(WeekdayDto::Wed),
+        "THU" => Some(WeekdayDto::Thu),
+        "FRI" => Some(WeekdayDto::Fri),
+        "SAT" => Some(WeekdayDto::Sat),
+        "SUN" => Some(WeekdayDto::Sun),
+        _ => None,
+    }
+}
+
 fn shutdown_state_from_snapshot(
     snapshot: shutdown::ScheduleSnapshot,
     now: DateTime<Local>,
@@ -1085,11 +1188,31 @@ fn shutdown_state_from_snapshot(
         ),
         None => (String::new(), false),
     };
-    let (weekly_text, weekly_active) = match snapshot.weekly {
-        Some(info) => (fmt_weekly(&info, now), true),
-        None => (String::new(), false),
+    let (weekly_text, weekly_active, weekly_days, weekly_time) = match snapshot.weekly {
+        Some(info) => {
+            let weekly_days = info
+                .days
+                .iter()
+                .filter_map(|day| weekday_dto_from_code(day))
+                .collect();
+            let (hour, minute) = info.time_hm;
+            (
+                fmt_weekly(&info, now),
+                true,
+                weekly_days,
+                Some(format!("{hour:02}:{minute:02}")),
+            )
+        }
+        None => (String::new(), false, Vec::new(), None),
     };
-    shutdown_state(once_text, once_active, weekly_text, weekly_active)
+    shutdown_state(
+        once_text,
+        once_active,
+        weekly_text,
+        weekly_active,
+        weekly_days,
+        weekly_time,
+    )
 }
 
 fn read_shutdown_state() -> ShutdownStateDto {
@@ -1239,6 +1362,22 @@ pub fn set_setting(input: SettingInputDto) -> SettingsCommandResponseDto {
             settings::save_settings(&loaded);
             "모니터 갱신 주기를 저장했습니다.".to_string()
         }
+        SettingKeyDto::UpdateAlertEnabled => {
+            let mut loaded = settings::load_settings();
+            loaded.update_alert_enabled = input.bool_value.unwrap();
+            settings::save_settings(&loaded);
+            if loaded.update_alert_enabled {
+                "업데이트 알림을 켰습니다.".to_string()
+            } else {
+                "업데이트 알림을 껐습니다.".to_string()
+            }
+        }
+        SettingKeyDto::UpdateCheckInterval => {
+            let mut loaded = settings::load_settings();
+            loaded.update_check_interval_ms = input.int_value.unwrap();
+            settings::save_settings(&loaded);
+            "업데이트 확인 주기를 저장했습니다.".to_string()
+        }
         SettingKeyDto::AutostartEnabled => {
             let on = input.bool_value.unwrap();
             let result = if on {
@@ -1297,6 +1436,7 @@ pub fn check_for_updates() -> UpdateCommandResponseDto {
                 false,
                 String::new(),
                 env!("APP_VERSION").to_string(),
+                None,
             ),
         ),
         Err(error) => {
@@ -1309,7 +1449,85 @@ pub fn check_for_updates() -> UpdateCommandResponseDto {
                     false,
                     String::new(),
                     env!("APP_VERSION").to_string(),
+                    None,
                 ),
+            )
+        }
+    }
+}
+
+#[tauri::command]
+pub fn check_update_alert() -> UpdateAlertCommandResponseDto {
+    if !settings::load_settings().update_alert_enabled {
+        return update_alert_command_response(
+            "업데이트 알림이 꺼져 있습니다.",
+            initial_update_state(),
+            false,
+            String::new(),
+        );
+    }
+
+    match update::check_latest_release() {
+        Ok(check) => {
+            let should_alert = if check.update_available {
+                let _guard = settings::write_lock();
+                let mut loaded = settings::load_settings();
+                if loaded.update_alert_enabled
+                    && should_alert_for_update(
+                        true,
+                        &check.latest_version,
+                        loaded.last_update_notified_version.as_deref(),
+                    )
+                {
+                    loaded.last_update_notified_version = Some(check.latest_version.clone());
+                    settings::save_settings(&loaded);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let state = update_state_from_check(check);
+            let alert_text = if should_alert {
+                state.status_text.clone()
+            } else {
+                String::new()
+            };
+            update_alert_command_response(
+                state.status_text.clone(),
+                state,
+                should_alert,
+                alert_text,
+            )
+        }
+        Err(update::Error::ChannelNotConfigured) => update_alert_command_response(
+            "업데이트 채널이 설정되지 않았습니다.",
+            update_state(
+                "업데이트 채널 미설정.".to_string(),
+                false,
+                false,
+                String::new(),
+                env!("APP_VERSION").to_string(),
+                None,
+            ),
+            false,
+            String::new(),
+        ),
+        Err(error) => {
+            let message = error.to_string();
+            update_alert_command_response(
+                message.clone(),
+                update_state(
+                    message,
+                    false,
+                    false,
+                    String::new(),
+                    env!("APP_VERSION").to_string(),
+                    None,
+                ),
+                false,
+                String::new(),
             )
         }
     }
@@ -1534,6 +1752,7 @@ pub fn cancel_shutdown(kind: ShutdownKindDto) -> ShutdownCommandResponseDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use serde_json::json;
 
     #[test]
@@ -1609,7 +1828,9 @@ mod tests {
                 "autostartMinimized": false,
                 "launcherPath": r"C:\Pearlabyss\BlackDesert\BlackDesertLauncher.exe",
                 "defaultMode": null,
-                "monitorIntervalMs": 1000
+                "monitorIntervalMs": 1000,
+                "updateAlertEnabled": true,
+                "updateCheckIntervalMs": 86400000
             })
         );
     }
@@ -1675,6 +1896,58 @@ mod tests {
     }
 
     #[test]
+    fn update_check_interval_accepts_only_supported_values() {
+        let make = |ms: Option<u32>| SettingInputDto {
+            key: SettingKeyDto::UpdateCheckInterval,
+            theme_mode: None,
+            bool_value: None,
+            string_value: None,
+            default_mode: None,
+            int_value: ms,
+        };
+
+        assert!(validate_setting_input_for_test(&make(Some(21_600_000))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(43_200_000))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(86_400_000))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(259_200_000))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(604_800_000))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(3_600_000))).is_err());
+        assert!(validate_setting_input_for_test(&make(None)).is_err());
+    }
+
+    #[test]
+    fn update_alert_setting_requires_bool_value() {
+        let input = SettingInputDto {
+            key: SettingKeyDto::UpdateAlertEnabled,
+            theme_mode: None,
+            bool_value: None,
+            string_value: None,
+            default_mode: None,
+            int_value: None,
+        };
+
+        let err = validate_setting_input_for_test(&input).unwrap_err();
+
+        assert!(err.contains("boolValue"));
+    }
+
+    #[test]
+    fn update_alert_notification_decision_dedupes_versions() {
+        assert!(should_alert_for_update_for_test(true, "0.1.2", None));
+        assert!(should_alert_for_update_for_test(
+            true,
+            "0.1.2",
+            Some("0.1.1")
+        ));
+        assert!(!should_alert_for_update_for_test(
+            true,
+            "0.1.2",
+            Some("0.1.2")
+        ));
+        assert!(!should_alert_for_update_for_test(false, "0.1.2", None));
+    }
+
+    #[test]
     fn default_mode_setting_accepts_none_selection() {
         let input = SettingInputDto {
             key: SettingKeyDto::DefaultMode,
@@ -1696,6 +1969,7 @@ mod tests {
             false,
             "https://github.com/owner/repo/releases/tag/v0.2.0".to_string(),
             "0.1.0".to_string(),
+            Some("0.2.0".to_string()),
         );
 
         let value = serde_json::to_value(state).unwrap();
@@ -1707,7 +1981,8 @@ mod tests {
                 "available": true,
                 "checking": false,
                 "releaseUrl": "https://github.com/owner/repo/releases/tag/v0.2.0",
-                "appVersion": "0.1.0"
+                "appVersion": "0.1.0",
+                "latestVersion": "0.2.0"
             })
         );
     }
@@ -1868,6 +2143,7 @@ mod tests {
                 false,
                 String::new(),
                 "0.1.0".to_string(),
+                None,
             ),
             monitor: monitor_not_running_state_for_test(
                 crate::backend::system_info::SystemInfo {
@@ -1942,6 +2218,8 @@ mod tests {
             true,
             "매주 월/수 05:00 (다음 2일 남음)".to_string(),
             true,
+            vec![WeekdayDto::Mon, WeekdayDto::Wed],
+            Some("05:00".to_string()),
         );
 
         let value = serde_json::to_value(state).unwrap();
@@ -1952,9 +2230,38 @@ mod tests {
                 "onceText": "2026-06-03 23:30 (1시간 남음)",
                 "onceActive": true,
                 "weeklyText": "매주 월/수 05:00 (다음 2일 남음)",
-                "weeklyActive": true
+                "weeklyActive": true,
+                "weeklyDays": ["MON", "WED"],
+                "weeklyTime": "05:00"
             })
         );
+    }
+
+    #[test]
+    fn shutdown_state_from_weekly_snapshot_carries_form_values() {
+        let now = Local
+            .with_ymd_and_hms(2026, 6, 4, 10, 0, 0)
+            .single()
+            .unwrap();
+        let next_run = Local
+            .with_ymd_and_hms(2026, 6, 7, 5, 7, 0)
+            .single()
+            .unwrap();
+        let state = shutdown_state_from_snapshot(
+            shutdown::ScheduleSnapshot {
+                once: None,
+                weekly: Some(shutdown::WeeklyInfo {
+                    days: vec!["MON", "SUN"],
+                    time_hm: (5, 7),
+                    next_run,
+                }),
+            },
+            now,
+        );
+
+        assert!(state.weekly_active);
+        assert_eq!(state.weekly_days, vec![WeekdayDto::Mon, WeekdayDto::Sun]);
+        assert_eq!(state.weekly_time, Some("05:07".to_string()));
     }
 
     #[test]
