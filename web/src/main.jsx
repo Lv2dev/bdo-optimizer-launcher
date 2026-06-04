@@ -37,7 +37,7 @@ import "pretendard/dist/web/variable/pretendardvariable.css";
 import "./styles.css";
 
 const EMPTY_STATE = {
-  appVersion: "0.1.0",
+  appVersion: "0.1.2",
   status: {
     current: "초기화 중입니다.",
     previous: "",
@@ -59,6 +59,8 @@ const EMPTY_STATE = {
     onceActive: false,
     weeklyText: "",
     weeklyActive: false,
+    weeklyDays: [],
+    weeklyTime: null,
   },
   settings: {
     themeMode: "system",
@@ -71,13 +73,16 @@ const EMPTY_STATE = {
     launcherPath: "",
     defaultMode: null,
     monitorIntervalMs: 1000,
+    updateAlertEnabled: true,
+    updateCheckIntervalMs: 86400000,
   },
   update: {
     statusText: "업데이트 채널 미설정.",
     available: false,
     checking: false,
     releaseUrl: "",
-    appVersion: "0.1.0",
+    appVersion: "0.1.2",
+    latestVersion: null,
   },
   monitor: {
     running: false,
@@ -107,6 +112,23 @@ const EMPTY_STATE = {
     statusText: "BlackDesert64.exe 프로세스를 찾을 수 없습니다.",
   },
 };
+
+const UPDATE_CHECK_INTERVAL_OPTIONS = [
+  { value: "21600000", label: "6시간" },
+  { value: "43200000", label: "12시간" },
+  { value: "86400000", label: "하루" },
+  { value: "259200000", label: "3일" },
+  { value: "604800000", label: "일주일" },
+];
+
+const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 86400000;
+
+function normalizeUpdateCheckIntervalMs(value) {
+  const asNumber = Number(value);
+  return UPDATE_CHECK_INTERVAL_OPTIONS.some((option) => Number(option.value) === asNumber)
+    ? asNumber
+    : DEFAULT_UPDATE_CHECK_INTERVAL_MS;
+}
 
 const MODE_META = {
   high: {
@@ -428,6 +450,11 @@ function browserPreviewPayload(command, args) {
         ...previewSettings,
         monitorIntervalMs: input.intValue ?? 1000,
       };
+    } else if (input.key === "update_check_interval") {
+      previewSettings = {
+        ...previewSettings,
+        updateCheckIntervalMs: normalizeUpdateCheckIntervalMs(input.intValue),
+      };
     } else {
       const map = {
         reduce_motion: "reduceMotion",
@@ -435,6 +462,7 @@ function browserPreviewPayload(command, args) {
         close_to_tray: "closeToTray",
         autostart_enabled: "autostartEnabled",
         autostart_minimized: "autostartMinimized",
+        update_alert_enabled: "updateAlertEnabled",
       };
       const field = map[input.key];
       if (field) {
@@ -463,10 +491,28 @@ function browserPreviewPayload(command, args) {
       available: false,
       checking: false,
       releaseUrl: "",
+      latestVersion: null,
     };
     return {
       status: { current: "업데이트 채널이 설정되지 않았습니다.", previous: "" },
       update: previewUpdate,
+    };
+  }
+
+  if (command === "check_update_alert") {
+    previewUpdate = {
+      ...previewUpdate,
+      statusText: "업데이트 채널 미설정.",
+      available: false,
+      checking: false,
+      releaseUrl: "",
+      latestVersion: null,
+    };
+    return {
+      status: { current: "업데이트 채널이 설정되지 않았습니다.", previous: "" },
+      update: previewUpdate,
+      shouldAlert: false,
+      alertText: "",
     };
   }
 
@@ -501,6 +547,8 @@ function browserPreviewPayload(command, args) {
         ...previewShutdown,
         weeklyText: `매주 ${days} ${input.time} (미리보기)`,
         weeklyActive: true,
+        weeklyDays: input.days,
+        weeklyTime: input.time,
       };
     }
     return {
@@ -513,7 +561,7 @@ function browserPreviewPayload(command, args) {
     previewShutdown =
       args.kind === "once"
         ? { ...previewShutdown, onceText: "", onceActive: false }
-        : { ...previewShutdown, weeklyText: "", weeklyActive: false };
+        : { ...previewShutdown, weeklyText: "", weeklyActive: false, weeklyDays: [], weeklyTime: null };
     return {
       status: { current: "예약 종료가 취소되었습니다.", previous: "" },
       shutdown: previewShutdown,
@@ -588,7 +636,7 @@ function Help({ tip }) {
   );
 }
 
-function GlassSelect({ value, options, onChange, width }) {
+function GlassSelect({ value, options, onChange, width, disabled = false }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const menuRef = useRef(null);
@@ -598,6 +646,12 @@ function GlassSelect({ value, options, onChange, width }) {
     typeof option === "string" ? { value: option, label: option } : option,
   );
   const selected = items.find((item) => item.value === value) ?? items[0];
+
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false);
+    }
+  }, [disabled]);
 
   useEffect(() => {
     if (!open) {
@@ -646,7 +700,12 @@ function GlassSelect({ value, options, onChange, width }) {
         className={`field gsel-btn${open ? " open" : ""}`}
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        onClick={() => {
+          if (!disabled) {
+            setOpen((v) => !v);
+          }
+        }}
       >
         <span className="gsel-val">{selected?.label ?? value}</span>
         <ChevronDown className="gsel-chev" aria-hidden="true" />
@@ -1042,6 +1101,7 @@ function ScheduleTab({ state, pending, runCommand }) {
   const [shutdownDate, setShutdownDate] = useState(todayValue);
   const [shutdownTime, setShutdownTime] = useState("23:30");
   const [days, setDays] = useState([currentWeekdayToken()]);
+  const lastAppliedWeeklyPresetRef = useRef("");
   const canRunCommand = pending === null;
   const shutdownParts = parseTimeParts(shutdownTime);
   const shutdownActive = state.shutdown.onceActive || state.shutdown.weeklyActive;
@@ -1050,6 +1110,28 @@ function ScheduleTab({ state, pending, runCommand }) {
     : state.shutdown.onceActive
       ? state.shutdown.onceText
       : "";
+
+  useEffect(() => {
+    if (!state.shutdown.weeklyActive) {
+      lastAppliedWeeklyPresetRef.current = "";
+      return;
+    }
+    const validTokens = new Set(WEEKDAYS.map(([token]) => token));
+    const weeklyDays = Array.isArray(state.shutdown.weeklyDays)
+      ? state.shutdown.weeklyDays.filter((day) => validTokens.has(day))
+      : [];
+    const weeklyTime = /^\d{2}:\d{2}$/.test(state.shutdown.weeklyTime || "")
+      ? state.shutdown.weeklyTime
+      : "";
+    const presetKey = `${weeklyDays.join(",")}|${weeklyTime}`;
+    if (!weeklyTime || weeklyDays.length === 0 || lastAppliedWeeklyPresetRef.current === presetKey) {
+      return;
+    }
+    lastAppliedWeeklyPresetRef.current = presetKey;
+    setShutdownKind("weekly");
+    setDays(weeklyDays);
+    setShutdownTime(weeklyTime);
+  }, [state.shutdown.weeklyActive, state.shutdown.weeklyDays, state.shutdown.weeklyTime]);
 
   const submitSchedule = () => {
     runCommand("schedule-add", "add_schedule_rule", {
@@ -1817,6 +1899,35 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
           <Help tip="GitHub Release에서 새 버전을 확인합니다" />
         </div>
         <p className="panel-sub">새 릴리스가 있으면 GitHub 릴리스 페이지로 이동합니다.</p>
+        <div className="set-row" style={{ paddingTop: 4 }}>
+          <div className="meta">
+            <div className="t">업데이트 알림</div>
+            <div className="d">{settings.updateAlertEnabled ? "자동 확인 켜짐" : "자동 확인 꺼짐"}</div>
+          </div>
+          <ToggleSwitch
+            checked={settings.updateAlertEnabled}
+            disabled={!canRunCommand}
+            label="업데이트 알림"
+            onToggle={() =>
+              setSetting("update_alert_enabled", {
+                boolValue: !settings.updateAlertEnabled,
+              })
+            }
+          />
+        </div>
+        <div className="set-row">
+          <div className="meta">
+            <div className="t">업데이트 확인 주기</div>
+            <div className="d">백그라운드에서 새 릴리스를 확인하는 간격입니다.</div>
+          </div>
+          <GlassSelect
+            value={String(normalizeUpdateCheckIntervalMs(settings.updateCheckIntervalMs))}
+            width={110}
+            disabled={!canRunCommand || !settings.updateAlertEnabled}
+            options={UPDATE_CHECK_INTERVAL_OPTIONS}
+            onChange={(value) => setSetting("update_check_interval", { intValue: Number(value) })}
+          />
+        </div>
         <div className={`update-box${update.available ? " available" : ""}`}>
           <span>{update.statusText}</span>
           <strong>v{update.appVersion}</strong>
@@ -1946,6 +2057,23 @@ function App() {
     [applyPayload, showToast],
   );
 
+  const pollUpdateAlert = useCallback(async () => {
+    if (!state.settings.updateAlertEnabled || pendingRef.current !== null) {
+      return;
+    }
+    try {
+      const rawPayload = isTauriRuntime()
+        ? await invoke("check_update_alert")
+        : browserPreviewPayload("check_update_alert", {});
+      applyPayload(normalizePayload("check_update_alert", rawPayload), false);
+      if (rawPayload.shouldAlert && rawPayload.alertText) {
+        showToast(rawPayload.alertText);
+      }
+    } catch (_) {
+      // 백그라운드 업데이트 확인 실패는 수동 확인 버튼의 명시 오류 흐름에 맡긴다.
+    }
+  }, [applyPayload, showToast, state.settings.updateAlertEnabled]);
+
   const reloadSchedule = useCallback(async () => {
     await runCommand("schedule-load", "list_schedule_rules", undefined, false);
     await runCommand("shutdown-load", "get_shutdown_state", undefined, false);
@@ -1974,6 +2102,23 @@ function App() {
   useEffect(() => {
     runCommand("init", "get_app_state", undefined, false);
   }, [runCommand]);
+
+  useEffect(() => {
+    if (!state.settings.updateAlertEnabled) {
+      return undefined;
+    }
+    const intervalMs = normalizeUpdateCheckIntervalMs(state.settings.updateCheckIntervalMs);
+    const startupTimer = window.setTimeout(pollUpdateAlert, 8000);
+    const intervalTimer = window.setInterval(pollUpdateAlert, intervalMs);
+    return () => {
+      window.clearTimeout(startupTimer);
+      window.clearInterval(intervalTimer);
+    };
+  }, [
+    pollUpdateAlert,
+    state.settings.updateAlertEnabled,
+    state.settings.updateCheckIntervalMs,
+  ]);
 
   useEffect(() => {
     const blockContextMenu = (event) => event.preventDefault();
