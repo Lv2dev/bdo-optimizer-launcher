@@ -51,6 +51,11 @@ Assert-Contains $releaseText 'npm ci' "release workflow does not install fronten
 Assert-Contains $releaseText 'npm audit' "release workflow does not run npm audit"
 Assert-Contains $releaseText 'npm run check:design-parity' "release workflow does not run design parity check"
 Assert-Contains $releaseText 'npm run build' "release workflow does not build frontend assets"
+Assert-Contains $releaseText 'npm run tauri:build' "release workflow must build the exe with 'npm run tauri:build' (bare cargo build bakes in the devUrl and does not embed the frontend)"
+if ($releaseText -match 'run:\s*cargo build --release') {
+    throw "release workflow must NOT use bare 'cargo build --release' as a build step (it does not embed the frontend -> 127.0.0.1 connection refused); use 'npm run tauri:build'"
+}
+Assert-Contains $releaseText 'docs/distribution/manual\.pdf' "release workflow does not publish the PDF manual as a release asset"
 Assert-Contains $releaseText 'tag_name:\s*\$\{\{\s*env\.RELEASE_TAG\s*\}\}' "GitHub Release does not use validated release tag"
 
 if ($readmeText -match '\[GitHub Releases\]\(#\)') {

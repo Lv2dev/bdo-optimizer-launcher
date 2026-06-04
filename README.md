@@ -135,7 +135,7 @@ bdo-optimizer-launcher.exe
 ## 개발자 정보
 
 - **언어**: Rust (edition 2021) + Tauri v2 + React/Vite
-- **빌드**: `npm run build` 후 `cargo build --release --locked`
+- **빌드**: `npm run tauri:build` (frontend를 exe에 임베드. ⚠️ bare `cargo build --release`는 devUrl이 박혀 실행 시 127.0.0.1 연결 거부가 난다)
 - **테스트**: `cargo test --all-targets --locked`
 - **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps --locked -- -D warnings` / `npm run check:design-parity` / `npm run build`
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`, `release.yml`)

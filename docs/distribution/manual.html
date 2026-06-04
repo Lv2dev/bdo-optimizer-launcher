@@ -1,316 +1,529 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
 <head>
-<meta charset="UTF-8">
-<title>BDO Optimizer Launcher 사용 설명서</title>
+<meta charset="UTF-8" />
+<title>BDO Optimizer 사용 설명서</title>
 <style>
   @page {
     size: A4;
-    margin: 18mm 16mm;
+    margin: 16mm 15mm 18mm;
   }
+
+  * {
+    box-sizing: border-box;
+  }
+
   body {
-    font-family: "Malgun Gothic", "맑은 고딕", "Noto Sans KR", sans-serif;
-    color: #1a1c30;
-    line-height: 1.55;
-    font-size: 11pt;
+    margin: 0;
+    color: #1d2633;
+    font-family: "Pretendard", "Malgun Gothic", "맑은 고딕", "Segoe UI", sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.62;
+    word-break: keep-all;
+  }
+
+  h1,
+  h2,
+  h3,
+  p {
     margin: 0;
   }
+
   h1 {
-    font-size: 22pt;
-    color: #1a3d5a;
-    margin: 0 0 4pt 0;
-    border-bottom: 2pt solid #2a7da8;
-    padding-bottom: 6pt;
+    font-size: 26pt;
+    line-height: 1.15;
+    color: #0f2d3a;
+    letter-spacing: 0;
   }
-  .subtitle {
-    color: #5a6070;
-    font-size: 10pt;
-    margin-bottom: 18pt;
-  }
+
   h2 {
-    font-size: 14pt;
-    color: #1a3d5a;
-    margin: 22pt 0 6pt 0;
-    padding-left: 8pt;
-    border-left: 4pt solid #2a7da8;
+    margin-top: 20pt;
+    margin-bottom: 7pt;
+    padding-bottom: 4pt;
+    border-bottom: 1pt solid #d7e2e8;
+    color: #123a48;
+    font-size: 15pt;
+    break-after: avoid;
   }
+
   h3 {
-    font-size: 12pt;
-    color: #2a3d5a;
-    margin: 14pt 0 4pt 0;
+    margin-top: 13pt;
+    margin-bottom: 4pt;
+    color: #24515f;
+    font-size: 11.5pt;
+    break-after: avoid;
   }
-  p { margin: 4pt 0; }
-  ul, ol { margin: 4pt 0; padding-left: 22pt; }
-  li { margin: 2pt 0; }
+
+  p {
+    margin-bottom: 6pt;
+  }
+
+  ul,
+  ol {
+    margin: 5pt 0 8pt 0;
+    padding-left: 18pt;
+  }
+
+  li {
+    margin: 2pt 0;
+  }
+
   code {
-    background: #f0f3f7;
+    white-space: normal;
+    overflow-wrap: anywhere;
     padding: 1pt 4pt;
     border-radius: 3pt;
+    background: #eef4f6;
+    color: #163745;
     font-family: Consolas, "Courier New", monospace;
-    font-size: 9.5pt;
-    color: #2a3d5a;
+    font-size: 9.3pt;
   }
-  pre {
-    background: #f0f3f7;
-    border: 1pt solid #d6dae8;
+
+  .cover {
+    min-height: 210mm;
+    padding-top: 18mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .eyebrow {
+    margin-bottom: 8pt;
+    color: #4b6974;
+    font-size: 10pt;
+    font-weight: 700;
+  }
+
+  .subtitle {
+    margin-top: 8pt;
+    color: #41535d;
+    font-size: 12pt;
+    max-width: 135mm;
+  }
+
+  .cover-box {
+    margin-top: 20pt;
+    padding: 12pt 14pt;
+    border: 1pt solid #d5e4e8;
+    border-left: 4pt solid #26b8bd;
+    border-radius: 8pt;
+    background: #f5fbfb;
+  }
+
+  .cover-box p {
+    margin: 0;
+  }
+
+  .meta {
+    margin-top: 24pt;
+    color: #5d6b74;
+    font-size: 9.5pt;
+  }
+
+  .small {
+    color: #66757e;
+    font-size: 9.3pt;
+  }
+
+  .note,
+  .calm,
+  .warning {
+    margin: 9pt 0;
     padding: 8pt 10pt;
-    border-radius: 4pt;
-    overflow-x: auto;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 9pt;
-    color: #1a3d5a;
-    margin: 6pt 0;
+    border-radius: 7pt;
     page-break-inside: avoid;
   }
-  table {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 6pt 0;
-    font-size: 10pt;
+
+  .note {
+    border: 1pt solid #d6e6ea;
+    background: #f4fbfc;
   }
-  th, td {
-    border: 1pt solid #c0c4d4;
-    padding: 4pt 8pt;
-    text-align: left;
+
+  .calm {
+    border: 1pt solid #dfe5ee;
+    background: #f7f9fc;
+  }
+
+  .warning {
+    border: 1pt solid #f0d5b8;
+    background: #fff8ef;
+  }
+
+  .figure {
+    margin: 9pt 0 14pt;
+    page-break-inside: avoid;
+  }
+
+  .figure img {
+    display: block;
+    width: 100%;
+    max-height: 171mm;
+    object-fit: contain;
+    border: 1pt solid #cfdce2;
+    border-radius: 8pt;
+  }
+
+  .caption {
+    margin-top: 4pt;
+    color: #60727a;
+    font-size: 9.2pt;
+    text-align: center;
+  }
+
+  .step-list {
+    counter-reset: step;
+    margin: 7pt 0 10pt;
+    padding: 0;
+    list-style: none;
+  }
+
+  .step-list li {
+    counter-increment: step;
+    position: relative;
+    margin: 0 0 6pt;
+    padding-left: 25pt;
+  }
+
+  .step-list li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 1pt;
+    width: 16pt;
+    height: 16pt;
+    border-radius: 50%;
+    background: #25bcc4;
+    color: #fff;
+    font-size: 9pt;
+    font-weight: 700;
+    line-height: 16pt;
+    text-align: center;
+  }
+
+  table {
+    width: 100%;
+    margin: 7pt 0 11pt;
+    border-collapse: collapse;
+    font-size: 9.6pt;
+    page-break-inside: avoid;
+  }
+
+  th,
+  td {
+    padding: 6pt 7pt;
+    border: 1pt solid #d5e0e6;
     vertical-align: top;
   }
+
   th {
-    background: #e8eef4;
-    color: #1a3d5a;
+    background: #edf6f8;
+    color: #173946;
     font-weight: 700;
   }
-  .figure {
-    margin: 10pt 0 18pt 0;
-    text-align: center;
-    page-break-inside: avoid;
+
+  .page-break {
+    page-break-before: always;
   }
-  .figure img {
-    max-width: 100%;
-    border: 1pt solid #c0c4d4;
-    border-radius: 4pt;
-  }
-  .figure .caption {
-    font-size: 9.5pt;
-    color: #5a6070;
-    margin-top: 4pt;
-    font-style: italic;
-  }
-  .note {
-    background: #fff8e1;
-    border-left: 3pt solid #f0a500;
-    padding: 6pt 10pt;
-    margin: 8pt 0;
-    font-size: 10pt;
-    border-radius: 0 4pt 4pt 0;
-  }
-  .warn {
-    background: #ffe8e0;
-    border-left: 3pt solid #c0392b;
-    padding: 6pt 10pt;
-    margin: 8pt 0;
-    font-size: 10pt;
-    border-radius: 0 4pt 4pt 0;
-  }
-  .badge {
-    display: inline-block;
-    background: #e0f5e8;
-    color: #1a6a32;
-    padding: 1pt 6pt;
-    border-radius: 3pt;
-    font-size: 9pt;
-    font-weight: 700;
-  }
-  footer {
-    margin-top: 28pt;
-    padding-top: 10pt;
-    border-top: 1pt solid #c0c4d4;
-    color: #7a8090;
+
+  .footer-note {
+    margin-top: 20pt;
+    padding-top: 8pt;
+    border-top: 1pt solid #d7e2e8;
+    color: #66757e;
     font-size: 9pt;
   }
-  .page-break { page-break-before: always; }
 </style>
 </head>
 <body>
 
-<h1>BDO Optimizer Launcher</h1>
-<div class="subtitle">검은사막 실행 · 성능 최적화 · 자동화 Windows 데스크톱 앱 · 사용 설명서</div>
-
-<h2>1. 개요</h2>
-<p>
-  검은사막(<code>BlackDesert64.exe</code>)의 실행 · CPU 우선순위/affinity 최적화 · 시간표 자동 모드 전환 · PC 예약 종료 · 시스템 트레이 상주 · 실시간 자원 모니터링을 한 화면에서 관리하는 단일 실행 파일입니다.
-  기존 Windows 배치 스크립트 기반 런처를 Rust + Tauri/React UI로 재구현했습니다.
-</p>
-
-<h3>핵심 기능</h3>
-<table>
-  <tr><th>기능</th><th>설명</th></tr>
-  <tr><td>모드 최적화</td><td>고성능 / 일반 / 저전력 3-state. CPU 우선순위 + affinity 즉시 조정. 게임가드 우회를 위한 단기 재적용 5회 자동.</td></tr>
-  <tr><td>P/E-core 자동 분리</td><td>Alder Lake+ 하이브리드 CPU에서 EfficiencyClass 인식 → 고성능은 P-core 전체, 저전력은 E-core만 사용.</td></tr>
-  <tr><td>자동 스케줄</td><td>시간대별 모드 자동 전환(매일/평일/주말/특정 날짜).</td></tr>
-  <tr><td>PC 예약 종료</td><td>단발 + 매주 반복 두 종류. Windows 작업 스케줄러 기반이라 앱 종료 후에도 동작.</td></tr>
-  <tr><td>실시간 자원 모니터</td><td>CPU/메모리/GPU/VRAM/Disk/FPS + 코어별 affinity 시각화. 1초 갱신.</td></tr>
-  <tr><td>시스템 트레이 상주</td><td>X 버튼 시 트레이로 숨김. 더블 클릭 복원. 메뉴에서 모드 즉시 전환 + 현재 모드 표시.</td></tr>
-  <tr><td>자동 시작</td><td>로그온 시 UAC 없이 자동 실행. <code>--minimized</code> 옵션으로 트레이 시작.</td></tr>
-  <tr><td>단일 인스턴스</td><td>두 번째 실행은 기존 창을 자동으로 포그라운드.</td></tr>
-</table>
-
-<h2>2. 요구사항</h2>
-<ul>
-  <li><strong>OS</strong>: Windows 10 1809 이상 (Windows 11 권장 — P/E-core 분리 affinity)</li>
-  <li><strong>권한</strong>: 관리자 권한 (CPU 우선순위/affinity 조작 + Windows 작업 스케줄러 호출)</li>
-  <li><strong>CPU</strong>: x64 (32비트 미지원)</li>
-  <li><strong>검은사막</strong>: 라이브 클라이언트 설치 필요</li>
-</ul>
-
-<h2>3. 설치 및 첫 실행</h2>
-
-<h3>3-1. 다운로드 후 SHA-256 검증</h3>
-<p>
-  GitHub Releases에서 같은 버전의 <code>bdo-optimizer-launcher.exe</code>와 <code>SHA256SUMS.txt</code>를 다운로드합니다. PowerShell에서:
-</p>
-<pre>cd 다운로드_폴더
-Get-FileHash .\bdo-optimizer-launcher.exe -Algorithm SHA256
-Get-Content .\SHA256SUMS.txt</pre>
-<p>두 해시 값이 일치하면 무결성 OK입니다.</p>
-
-<h3>3-2. SmartScreen 경고</h3>
-<p>코드사이닝 미적용이라 첫 실행 시 Windows Defender SmartScreen 경고가 표시됩니다.</p>
-<ol>
-  <li>"Windows에서 PC를 보호했습니다" 화면</li>
-  <li><strong>"추가 정보"</strong> 클릭</li>
-  <li><strong>"실행"</strong> 버튼 클릭</li>
-</ol>
-<p>이후 실행에는 경고가 표시되지 않습니다.</p>
-
-<h3>3-3. UAC 승인</h3>
-<p>관리자 권한 요청 UAC 프롬프트에 <strong>"예"</strong> 선택. 자동 시작 등록 후에는 UAC 없이 로그온 시 자동 실행됩니다.</p>
-
-<div class="warn">
-  <strong>주의:</strong> 자동 시작은 관리자 권한 작업으로 등록되므로 <code>.exe</code>는 <code>Program Files</code>처럼 일반 사용자가 임의로 덮어쓰기 어려운 위치에 두는 것을 권장합니다. 사용자 프로필 / AppData / 임시 폴더 아래에서 실행 중인 경우 자동 시작 등록이 안전상 거부됩니다.
-</div>
+<section class="cover">
+  <div>
+    <div class="eyebrow">검은사막 실행과 PC 최적화를 한곳에서 관리하는 작은 도구</div>
+    <h1>BDO Optimizer<br />사용 설명서</h1>
+    <p class="subtitle">
+      처음 사용하는 분도 천천히 따라 할 수 있도록, 설치부터 실행, 버튼 의미,
+      문제가 생겼을 때 확인할 부분까지 차분하게 정리했습니다.
+    </p>
+    <div class="cover-box">
+      <p>
+        이 프로그램은 검은사막 게임 파일을 바꾸지 않습니다.
+        Windows가 제공하는 권한 안에서 게임 프로세스의 우선순위와 CPU 사용 범위를 조정하고,
+        예약 종료와 자동 모드 전환을 도와줍니다.
+      </p>
+    </div>
+    <div class="meta">
+      버전: v0.1.0<br />
+      대상: Windows 10/11 64비트<br />
+      문서 기준일: 2026-06-04
+    </div>
+  </div>
+  <p class="small">
+    이 문서는 “컴퓨터를 잘 몰라도 차근차근 따라 할 수 있는 설명서”를 목표로 작성했습니다.
+    모르는 용어가 나오면 그 부분은 건너뛰고, 번호가 붙은 순서만 따라 하셔도 괜찮습니다.
+  </p>
+</section>
 
 <div class="page-break"></div>
 
-<h2>4. 화면 구성</h2>
+<h2>1. 먼저 알아두면 좋은 점</h2>
 
-<h3>4-1. 제어 탭</h3>
-<p>관리자 권한 · 게임 실행 · 현재 모드 · 자동 스케줄 4개 상태를 한눈에 확인하고 모드를 즉시 적용합니다. 게임이 실행 중이고 관리자 권한이 있을 때만 모드 버튼이 활성화됩니다.</p>
-<div class="figure">
-  <img src="screenshots/01-control.png" alt="제어 탭">
-  <div class="caption">그림 1. 제어 탭 — 상태 요약 + 모드 적용 + 게임 실행</div>
-</div>
-
-<h3>4-2. 스케줄 탭</h3>
+<h3>이 프로그램이 하는 일</h3>
 <p>
-  <strong>자동 모드:</strong> 시간대별 모드 자동 전환 규칙 등록. 매일/평일/주말/특정 날짜 4종 + 우선순위(특정 날짜가 가장 높음).<br>
-  <strong>PC 예약 종료:</strong> 단발(날짜+시간) 또는 매주 반복(요일+시간). 등록 후에는 앱을 종료해도 Windows 작업 스케줄러가 종료를 실행합니다.
+  BDO Optimizer는 검은사막을 실행하고, 게임이 켜져 있을 때 PC 자원을 조금 더 알맞게 쓰도록 돕는 프로그램입니다.
+  예를 들어 게임을 할 때는 <strong>고성능</strong>으로, 잠시 자리를 비우거나 창을 내려둘 때는 <strong>저전력</strong>으로 바꿀 수 있습니다.
 </p>
-<div class="figure">
-  <img src="screenshots/02-schedule.png" alt="스케줄 탭">
-  <div class="caption">그림 2. 스케줄 탭 — 자동 모드 규칙 + PC 예약 종료</div>
-</div>
 
-<h3>4-3. 모니터 탭</h3>
-<p>게임 실행 중일 때 1초 간격으로 CPU · 메모리 · GPU · VRAM · Disk I/O · FPS · 코어별 CPU 사용률을 갱신합니다. 코어별 막대/sparkline에서 affinity가 활성화된 코어는 청록으로 강조됩니다.</p>
-<div class="figure">
-  <img src="screenshots/03-monitor.png" alt="모니터 탭">
-  <div class="caption">그림 3. 모니터 탭 — 자원 사용량 + 코어별 affinity 시각화</div>
-</div>
-
-<h3>4-4. 설정 탭</h3>
-<p>테마(라이트/다크/Windows 자동) · 액센트 · 애니메이션 줄이기 · 런처 동작(자동 저전력/X 버튼) · 시작 옵션(자동 시작/트레이 시작) · 런처 경로 · 업데이트 · 진단(로그 폴더 열기) 카드를 제공합니다.</p>
-<div class="figure">
-  <img src="screenshots/04-settings.png" alt="설정 탭">
-  <div class="caption">그림 4. 설정 탭 — 테마 · 접근성 · 런처 동작 · 시작 옵션</div>
-</div>
-
-<h3>4-5. 시스템 트레이</h3>
-<p>X 버튼 동작이 켜져 있으면 창 닫기 시 작업 표시줄 우측 트레이에 상주합니다. 트레이 아이콘 우클릭 메뉴에서 현재 모드가 체크 표시되어 한눈에 확인 가능하고, 클릭으로 모드를 즉시 전환할 수 있습니다. 메뉴 항목: 창 토글 · 고성능/일반/저전력 모드 · 단발 예약 취소 · 종료.</p>
-
-<div class="page-break"></div>
-
-<h2>5. 운영 시나리오</h2>
-
-<h3>5-1. 게임 자동 최적화</h3>
-<ol>
-  <li>제어 탭에서 "게임 실행" 클릭 → 검은사막 런처 spawn</li>
-  <li>게임이 실행되면 제어 탭 "게임" 상태가 <span class="badge">실행 중</span>으로 변경</li>
-  <li>마지막에 사용한 모드(<code>last_user_mode</code>)가 자동 적용</li>
-  <li>활성 자동 규칙이 있으면 그 모드가 우선 적용됨 (60초 자동 타이머 + 게임 신규 실행 감지 시 즉시 반영)</li>
-</ol>
-
-<h3>5-2. 시간대별 자동 모드 전환</h3>
-<p>예: "평일 22:00-02:00 고성능 / 그 외 저전력"</p>
-<ol>
-  <li>스케줄 탭 → "자동 모드" 아코디언 열기</li>
-  <li>규칙 이름(예: "야간 게임") + 종류(평일) + 시작(22:00) + 종료(02:00) + 모드(고성능) → "+ 규칙 추가"</li>
-  <li>두 번째 규칙: "매일" + 02:00-22:00 + 저전력 추가</li>
-  <li>60초마다 자동 타이머가 현재 시각의 활성 규칙을 평가해 모드 적용</li>
-</ol>
-
-<h3>5-3. PC 예약 종료</h3>
-<p><strong>단발:</strong> 스케줄 탭 → "PC 예약 종료" 아코디언 → "단발 종료" 선택 → 날짜(달력) + 시간 → 등록</p>
-<p><strong>매주 반복:</strong> "매주 반복" 선택 → 요일 체크(MON-SUN) + 시간 → 등록</p>
-<p>등록 후 활성 상태가 카드에 표시되고 "단발 취소" 또는 "반복 취소" 버튼으로 개별 해제 가능합니다.</p>
-
-<h3>5-4. 시스템 트레이 자동화</h3>
-<ul>
-  <li><strong>자동 저전력:</strong> 설정 → "게임이 트레이로 내려가면 자동 저전력 모드" ON → 검은사막 창이 숨김 상태가 되면 저전력 모드를 적용하고, 다시 보이면 직전 모드로 복원</li>
-  <li><strong>X 버튼 동작:</strong> 설정 → "X 버튼 시 트레이로 숨기기" ON(기본) → 종료 대신 트레이로 숨김. OFF면 X로 완전 종료</li>
-  <li><strong>완전 종료:</strong> 트레이 아이콘 우클릭 → "종료"</li>
-</ul>
-
-<h2>6. 문제 해결</h2>
-
-<table>
-  <tr><th>증상</th><th>원인 / 해결</th></tr>
-  <tr>
-    <td>모드 적용 시 "프로세스를 찾을 수 없음"</td>
-    <td>검은사막이 실행 중이 아님. 게임을 먼저 실행하고 제어 탭에서 "상태 새로고침" 클릭.</td>
-  </tr>
-  <tr>
-    <td>FPS가 "세션 미시작" 또는 "ETW 이벤트 없음"</td>
-    <td>ETW DXGI provider 권한 문제. 앱 재시작 또는 관리자 권한 재확인. 다른 ETW 도구(GPU-Z, MSI Afterburner 등) 종료 후 재시도.</td>
-  </tr>
-  <tr>
-    <td>자동 시작이 등록되지 않음</td>
-    <td>.exe가 사용자 프로필 / AppData / 임시 폴더 아래에 있어 안전상 거부. <code>Program Files</code> 또는 관리자 전용 위치로 이동 후 재시도.</td>
-  </tr>
-  <tr>
-    <td>SmartScreen 경고 반복</td>
-    <td>.exe를 옮기거나 새 버전을 다운로드한 경우 다시 표시될 수 있음. "추가 정보" → "실행"으로 통과.</td>
-  </tr>
-  <tr>
-    <td>P-core만 활성화되지 않음</td>
-    <td>Alder Lake+ 이전 CPU는 hybrid 미지원. 기존 SMT 짝수 비트 affinity로 fallback. 정상 동작.</td>
-  </tr>
-  <tr>
-    <td>로그 위치 확인</td>
-    <td>설정 탭 → "진단" 카드 → "로그 폴더 열기" 또는 <code>%LOCALAPPDATA%\bdo-optimizer-launcher\logs\</code></td>
-  </tr>
-</table>
+<h3>관리자 권한이 필요한 이유</h3>
+<p>
+  Windows에서 다른 프로그램의 우선순위나 CPU 사용 범위를 바꾸려면 관리자 권한이 필요합니다.
+  그래서 처음 실행할 때 “이 앱이 디바이스를 변경하도록 허용하시겠습니까?”라는 창이 나오면 <strong>예</strong>를 눌러야 합니다.
+</p>
 
 <div class="note">
-  <strong>상세 진단:</strong> 환경변수 <code>RUST_LOG=debug</code> 설정 후 앱 재실행 시 모든 모듈의 debug 로그가 파일에 기록됩니다.
+  <strong>안심해도 되는 부분:</strong>
+  BDO Optimizer는 검은사막 파일, 게임 메모리, 네트워크 패킷을 수정하지 않습니다.
+  다만 게임 회사의 정책은 바뀔 수 있으므로, 외부 도구 사용에 대한 책임은 사용자에게 있습니다.
 </div>
 
-<h2>7. 면책 및 안전</h2>
+<h2>2. 설치와 첫 실행</h2>
+
+<h3>1단계. 파일 내려받기</h3>
+<ol class="step-list">
+  <li>GitHub Releases 페이지에서 <code>bdo-optimizer-launcher.exe</code>를 내려받습니다.</li>
+  <li>같은 곳에 있는 <code>SHA256SUMS.txt</code>도 함께 내려받아 두면 파일이 손상되지 않았는지 확인할 수 있습니다.</li>
+  <li>가능하면 <code>Program Files</code>처럼 일반 사용자가 함부로 바꾸기 어려운 폴더에 exe를 두는 것을 권장합니다.</li>
+</ol>
+
+<h3>2단계. Windows 경고창 처리하기</h3>
 <p>
-  본 앱은 검은사막의 <strong>외부 도구(클라이언트 비변조)</strong>입니다. CPU 우선순위/affinity 조정은 Windows API의 표준 기능이며, 게임 클라이언트의 메모리 · 패킷 · 파일을 수정하지 않습니다.
-  다만 게임 운영 정책상 "외부 도구 사용"의 회색 지대에 있을 수 있으므로 사용 책임은 사용자에게 있습니다.
+  처음 실행할 때 SmartScreen 경고가 보일 수 있습니다. 코드서명 인증서를 아직 붙이지 않았기 때문에 생기는 정상적인 경고입니다.
 </p>
-<p>게임가드는 외부에서 priority/affinity가 변경되면 일정 시간 후 원복하려는 경향이 있어, 앱은 모드 적용 직후 0.5초/1초/2초/5초/10초에 동일 모드를 5회 자동 재적용해 사용자가 의도한 설정을 유지하려 시도합니다.</p>
+<ol class="step-list">
+  <li>“Windows에서 PC를 보호했습니다” 화면이 나오면 <strong>추가 정보</strong>를 누릅니다.</li>
+  <li>그다음 <strong>실행</strong> 버튼을 누릅니다.</li>
+  <li>UAC 창이 나오면 <strong>예</strong>를 누릅니다.</li>
+</ol>
 
-<h2>8. 라이선스 / 빌드 정보</h2>
-<ul>
-  <li>임베드 글꼴: <strong>Pretendard</strong> (SIL Open Font License 1.1)</li>
-  <li>주요 의존성: Rust · Tauri v2 · React/Vite · windows-rs · ferrisetw · tracing</li>
-  <li>코드사이닝 미적용 — 신뢰는 SHA-256 해시 검증으로 확인</li>
-</ul>
+<div class="warning">
+  <strong>자동 시작을 쓸 때:</strong>
+  exe 파일이 다운로드 폴더, AppData, 임시 폴더처럼 누구나 쉽게 바꿀 수 있는 위치에 있으면 자동 시작 등록이 거부될 수 있습니다.
+  이 경우 exe를 더 안전한 폴더로 옮긴 뒤 다시 설정하세요.
+</div>
 
-<footer>
-  BDO Optimizer Launcher · v0.1.0 · Windows 10 1809+ x64 · 관리자 권한 필요
-</footer>
+<h3>파일이 맞는지 확인하고 싶다면</h3>
+<p>
+  PowerShell을 열고 아래처럼 입력하면 exe의 해시 값을 볼 수 있습니다.
+  나온 값이 <code>SHA256SUMS.txt</code>에 적힌 값과 같으면 정상입니다.
+</p>
+<p><code>Get-FileHash .\bdo-optimizer-launcher.exe -Algorithm SHA256</code></p>
+
+<h2>3. 제어 탭: 가장 자주 쓰는 화면</h2>
+<p>
+  제어 탭은 앱의 기본 화면입니다. 게임이 켜져 있는지, 현재 어떤 모드인지, 스케줄 규칙이 있는지를 한눈에 보여줍니다.
+</p>
+
+<div class="figure">
+  <img src="screenshots/01-control.png" alt="제어 탭 화면" />
+  <div class="caption">제어 탭. 상태 확인, 게임 실행, 모드 변경을 한곳에서 할 수 있습니다.</div>
+</div>
+
+<h3>버튼을 어떻게 쓰면 되나요?</h3>
+<table>
+  <tr>
+    <th>버튼/상태</th>
+    <th>의미</th>
+  </tr>
+  <tr>
+    <td>상태 새로고침</td>
+    <td>게임이 켜졌는지 다시 확인합니다. 게임을 방금 켰는데 화면이 바뀌지 않으면 눌러보세요.</td>
+  </tr>
+  <tr>
+    <td>게임 실행</td>
+    <td>검은사막 런처를 실행합니다. 런처 경로가 잘못되어 있으면 설정 탭에서 경로를 확인합니다.</td>
+  </tr>
+  <tr>
+    <td>고성능</td>
+    <td>게임할 때 권장합니다. CPU 우선순위를 높이고 성능 중심으로 맞춥니다.</td>
+  </tr>
+  <tr>
+    <td>일반</td>
+    <td>기본에 가까운 상태입니다. 특별히 바꿀 필요가 없을 때 사용합니다.</td>
+  </tr>
+  <tr>
+    <td>저전력</td>
+    <td>잠시 자리를 비우거나 게임 창을 내려둘 때 사용합니다. PC 부담을 줄이는 쪽입니다.</td>
+  </tr>
+</table>
+
+<div class="calm">
+  처음에는 너무 많은 설정을 바꾸지 않아도 됩니다.
+  게임을 켜고, 제어 탭에서 <strong>고성능</strong>만 눌러보는 것으로 시작해도 충분합니다.
+</div>
+
+<h2>4. 스케줄 탭: 자동 모드와 예약 종료</h2>
+<p>
+  스케줄 탭은 “언제 어떤 모드로 바꿀지”와 “언제 PC를 끌지”를 정하는 곳입니다.
+  매일 같은 시간에 게임을 하거나, 새벽에 자동 종료하고 싶을 때 유용합니다.
+</p>
+
+<div class="figure">
+  <img src="screenshots/02-schedule.png" alt="스케줄 탭 화면" />
+  <div class="caption">스케줄 탭. 자동 모드 전환과 PC 예약 종료를 설정합니다.</div>
+</div>
+
+<h3>PC 예약 종료 등록하기</h3>
+<ol class="step-list">
+  <li>스케줄 탭에서 <strong>PC 예약 종료</strong> 영역을 확인합니다.</li>
+  <li>한 번만 종료하려면 <strong>단발 종료</strong>를 선택합니다.</li>
+  <li>매주 같은 요일에 종료하려면 <strong>매주 반복</strong>을 선택합니다.</li>
+  <li>날짜 또는 요일, 시간을 정한 뒤 <strong>예약 등록</strong>을 누릅니다.</li>
+  <li>취소하고 싶으면 같은 화면의 <strong>예약 취소</strong>를 누릅니다.</li>
+</ol>
+
+<h3>자동 모드 전환은 언제 쓰나요?</h3>
+<p>
+  예를 들어 “저녁 8시부터 새벽 1시까지는 고성능, 그 외 시간은 저전력”처럼 정해둘 수 있습니다.
+  다만 처음 쓰는 분이라면 예약 종료만 먼저 사용해 보고, 익숙해진 뒤 자동 모드를 추가하는 것을 권장합니다.
+</p>
+
+<div class="note">
+  예약 종료는 Windows 작업 스케줄러를 사용합니다.
+  한 번 등록하면 앱 창을 닫아도 예약은 남아 있을 수 있으니, 필요 없어졌다면 꼭 <strong>예약 취소</strong>를 눌러주세요.
+</div>
+
+<h2>5. 모니터 탭: PC 상태 보기</h2>
+<p>
+  모니터 탭은 게임이 실행 중일 때 CPU, 메모리, GPU, VRAM, FPS 같은 정보를 보여줍니다.
+  숫자를 정확히 외울 필요는 없고, “너무 높게 치솟는지” 정도만 보셔도 충분합니다.
+</p>
+
+<div class="figure">
+  <img src="screenshots/03-monitor.png" alt="모니터 탭 화면" />
+  <div class="caption">모니터 탭. 게임 실행 중일 때 자원 사용량을 그래프로 볼 수 있습니다.</div>
+</div>
+
+<h3>무엇을 보면 되나요?</h3>
+<table>
+  <tr>
+    <th>항목</th>
+    <th>쉽게 말하면</th>
+  </tr>
+  <tr>
+    <td>CPU</td>
+    <td>게임과 프로그램들이 CPU를 얼마나 쓰는지 보여줍니다.</td>
+  </tr>
+  <tr>
+    <td>메모리</td>
+    <td>RAM을 얼마나 쓰는지 보여줍니다. 여유가 너무 적으면 다른 프로그램을 닫아보세요.</td>
+  </tr>
+  <tr>
+    <td>GPU / VRAM</td>
+    <td>그래픽카드와 그래픽 메모리 사용량입니다. 그래픽 옵션을 높이면 올라갈 수 있습니다.</td>
+  </tr>
+  <tr>
+    <td>FPS</td>
+    <td>화면이 초당 몇 장씩 그려지는지 나타냅니다. 낮을수록 화면이 끊겨 보일 수 있습니다.</td>
+  </tr>
+  <tr>
+    <td>코어별</td>
+    <td>CPU 코어가 어떻게 쓰이는지 보여줍니다. 고성능/저전력 모드가 제대로 적용되는지 확인할 때 유용합니다.</td>
+  </tr>
+</table>
+
+<div class="calm">
+  숫자가 조금 오르내리는 것은 정상입니다.
+  게임 장면, 마을/사냥터, 창 전환에 따라 그래프가 계속 움직일 수 있습니다.
+</div>
+
+<h2>6. 설정 탭: 내 사용 방식에 맞추기</h2>
+<p>
+  설정 탭은 앱의 색상, 시작 방식, 트레이 동작, 런처 경로, 업데이트 확인을 관리하는 곳입니다.
+</p>
+
+<div class="figure">
+  <img src="screenshots/04-settings.png" alt="설정 탭 화면" />
+  <div class="caption">설정 탭. 테마, 트레이 동작, 자동 시작, 런처 경로 등을 관리합니다.</div>
+</div>
+
+<h3>처음에 확인하면 좋은 설정</h3>
+<table>
+  <tr>
+    <th>설정</th>
+    <th>추천</th>
+  </tr>
+  <tr>
+    <td>자동 (OS 설정)</td>
+    <td>Windows의 밝은/어두운 테마를 따라갑니다. 특별히 취향이 없으면 그대로 두면 됩니다.</td>
+  </tr>
+  <tr>
+    <td>애니메이션 줄이기</td>
+    <td>화면 움직임이 불편하거나 노트북 배터리를 조금 아끼고 싶다면 켭니다.</td>
+  </tr>
+  <tr>
+    <td>게임이 트레이로 내려가면 자동 저전력 모드</td>
+    <td>게임 창을 내려두고 다른 일을 자주 한다면 켜두면 좋습니다.</td>
+  </tr>
+  <tr>
+    <td>창 닫기 시 트레이로 숨기기</td>
+    <td>실수로 앱이 꺼지는 것을 막고 싶다면 켜두세요. 완전히 종료하려면 트레이 메뉴에서 종료합니다.</td>
+  </tr>
+  <tr>
+    <td>Windows 시작 시 자동 실행</td>
+    <td>매일 게임을 한다면 편합니다. 불편하면 언제든 끌 수 있습니다.</td>
+  </tr>
+</table>
+
+<h3>트레이에서 다시 여는 방법</h3>
+<ol class="step-list">
+  <li>작업 표시줄 오른쪽 아래의 작은 화살표를 누릅니다.</li>
+  <li>BDO Optimizer 아이콘을 찾습니다.</li>
+  <li>아이콘을 더블클릭하면 창이 다시 열립니다.</li>
+  <li>완전히 끄려면 아이콘을 마우스 오른쪽 버튼으로 누른 뒤 <strong>종료</strong>를 선택합니다.</li>
+</ol>
+
+<h2>7. 문제가 생겼을 때</h2>
+
+<table>
+  <tr>
+    <th>상황</th>
+    <th>천천히 확인할 것</th>
+  </tr>
+  <tr>
+    <td>모드 버튼이 잘 안 눌립니다.</td>
+    <td>검은사막이 켜져 있는지 확인한 뒤 <strong>상태 새로고침</strong>을 눌러보세요. 관리자 권한으로 실행됐는지도 확인합니다.</td>
+  </tr>
+  <tr>
+    <td>게임 실행 버튼이 동작하지 않습니다.</td>
+    <td>설정 탭의 런처 경로가 맞는지 확인합니다. 검은사막 런처 파일 이름은 보통 <code>BlackDesertLauncher.exe</code>입니다.</td>
+  </tr>
+  <tr>
+    <td>자동 시작 등록이 안 됩니다.</td>
+    <td>exe가 다운로드 폴더나 AppData 아래에 있으면 안전상 거부될 수 있습니다. 더 안전한 폴더로 옮긴 뒤 다시 시도하세요.</td>
+  </tr>
+  <tr>
+    <td>FPS가 보이지 않습니다.</td>
+    <td>게임이 완전히 실행된 뒤 모니터 탭을 다시 열어보세요. 그래도 안 보이면 앱을 다시 실행해 봅니다.</td>
+  </tr>
+  <tr>
+    <td>창을 닫았는데 앱이 꺼지지 않았습니다.</td>
+    <td>설정에서 “창 닫기 시 트레이로 숨기기”가 켜져 있으면 정상입니다. 작업 표시줄 오른쪽 아래 트레이에서 다시 열거나 종료할 수 있습니다.</td>
+  </tr>
+  <tr>
+    <td>문제가 계속됩니다.</td>
+    <td>설정 탭의 <strong>로그 폴더 열기</strong>를 눌러 로그 파일을 확인합니다. 오류를 공유할 때 이 로그가 도움이 됩니다.</td>
+  </tr>
+</table>
+
+<h2>8. 마무리</h2>
+<p>
+  처음에는 많은 기능을 한 번에 쓰려고 하지 않아도 됩니다.
+  먼저 게임을 실행하고, 제어 탭에서 고성능/일반/저전력 버튼이 어떤 느낌인지 확인해 보세요.
+  익숙해진 뒤 예약 종료, 자동 모드 전환, 자동 시작 같은 기능을 하나씩 켜면 됩니다.
+</p>
+
+<div class="footer-note">
+  BDO Optimizer v0.1.0 · Windows 전용 · 관리자 권한 필요 · 단일 exe 배포
+</div>
 
 </body>
 </html>

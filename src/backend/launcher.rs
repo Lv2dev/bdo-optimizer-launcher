@@ -83,8 +83,11 @@ fn find_launcher_fallback() -> Option<PathBuf> {
     }
 
     // 3. C:\~Z:\Pearlabyss\BlackDesert\BlackDesertLauncher.exe
-    // M76 (CR-2): 드라이브 풀스캔 결과에도 is_launcher_exe를 적용해
-    // 비관리자가 마운트한 USB/네트워크 드라이브의 가짜 경로 spawn을 차단한다.
+    // M76 (CR-2): 드라이브 풀스캔 결과에도 is_launcher_exe(파일명)를 적용한다.
+    // 수용된 잔여 리스크(2026-06-04 리뷰): 고정 드라이브 제한(DRIVE_FIXED)이 없어 removable/
+    // network 드라이브의 동명 경로도 후보가 된다. 사용자 입력 경로가 없을 때만 도달하며, 이미
+    // 같은 사용자 권한을 전제로 하는 1인 로컬 위협모델상 ROI가 낮아 명시적으로 수용한다.
+    // 위협모델이 바뀌면 GetDriveTypeW로 DRIVE_FIXED만 스캔하도록 강화할 것.
     drive_scan_candidates().find(|candidate| candidate.exists() && is_launcher_exe(candidate))
 }
 
