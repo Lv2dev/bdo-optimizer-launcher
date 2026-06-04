@@ -85,3 +85,31 @@ fn tauri_capability_grants_window_controls() {
         );
     }
 }
+
+// Tier 2: 관리자 권한 앱의 공격 표면을 정적으로 잠근다. capabilities에 위험 플러그인 권한이
+// 추가되거나 CSP가 null로 회귀하면 빌드는 통과해도 방어심층이 무너지므로 테스트로 막는다.
+#[test]
+fn capabilities_have_no_dangerous_permissions() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let capability = read_text(root, "capabilities/default.json");
+    for forbidden in ["shell:", "fs:", "http:", "process:"] {
+        assert!(
+            !capability.contains(forbidden),
+            "capabilities/default.json grants dangerous permission `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn tauri_config_keeps_csp_defense() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let conf = read_text(root, "tauri.conf.json");
+    assert!(
+        !conf.contains("\"csp\": null"),
+        "tauri.conf.json must keep a non-null CSP (defense-in-depth for an admin app)"
+    );
+    assert!(
+        conf.contains("default-src"),
+        "tauri.conf.json CSP must define default-src"
+    );
+}
