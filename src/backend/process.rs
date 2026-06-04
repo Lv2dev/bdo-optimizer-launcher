@@ -8,9 +8,10 @@ use windows::Win32::System::SystemInformation::{
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 use windows::Win32::System::Threading::{
-    GetPriorityClass, OpenProcess, QueryFullProcessImageNameW, SetPriorityClass,
-    SetProcessAffinityMask, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
-    PROCESS_CREATION_FLAGS, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetPriorityClass, GetProcessAffinityMask, OpenProcess, QueryFullProcessImageNameW,
+    SetPriorityClass, SetProcessAffinityMask, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS,
+    NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 // M66b: thiserror enum. 호출처 Display 메시지를 기존 String과 동일하게 유지.
@@ -40,26 +41,49 @@ pub struct CpuInfo {
     pub has_hybrid: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessModeSnapshot {
+    pub priority_class: u32,
+    pub affinity_mask: usize,
+}
+
 pub fn get_cpu_info() -> CpuInfo {
     let fallback_logical = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
 
-    // 1) P/E-core 인식 시도 (Win10 1809+ GetLogicalProcessorInformationEx + EfficiencyClass).
-    //    실패 시 (구형 OS 등) 기존 GetLogicalProcessorInformation으로 fallback.
-    if let Some((p_mask, e_mask, phys, logical)) = unsafe { enumerate_cores_ex() } {
-        let has_hybrid = e_mask != 0;
+    let ex = unsafe { enumerate_cores_ex() };
+    let physical_cores = count_physical_cores();
+    build_cpu_info_from_detection(ex, fallback_logical, physical_cores)
+}
+
+fn build_cpu_info_from_detection(
+    ex: Option<(usize, usize, u32, u32)>,
+    fallback_logical: u32,
+    legacy_physical: Option<u32>,
+) -> CpuInfo {
+    let fallback_logical = fallback_logical.max(1);
+    if let Some((p_mask, e_mask, phys, logical)) = ex {
+        if e_mask != 0 {
+            return CpuInfo {
+                physical_cores: phys.max(1),
+                logical_threads: logical.max(fallback_logical),
+                p_core_mask: p_mask,
+                e_core_mask: e_mask,
+                has_hybrid: true,
+            };
+        }
+        let physical_cores = legacy_physical.unwrap_or(phys).max(1);
         return CpuInfo {
-            physical_cores: phys.max(1),
+            physical_cores,
             logical_threads: logical.max(fallback_logical),
-            p_core_mask: p_mask,
-            e_core_mask: e_mask,
-            has_hybrid,
+            p_core_mask: 0,
+            e_core_mask: 0,
+            has_hybrid: false,
         };
     }
 
-    // 2) Fallback — P/E 정보 없음, 기존 동작 유지.
-    let physical_cores = count_physical_cores().unwrap_or((fallback_logical / 2).max(1));
+    let physical_cores = legacy_physical.unwrap_or((fallback_logical / 2).max(1));
     CpuInfo {
         physical_cores,
         logical_threads: fallback_logical,
@@ -302,19 +326,53 @@ fn scan_for_pid(exe_name: &str) -> Option<u32> {
 }
 
 /// BlackDesert64.exe의 현재 Priority Class를 읽어 적용된 모드를 반환.
-/// HIGH → High, NORMAL → Normal, IDLE → LowPower, 그 외 → None.
+/// Priority Class와 Affinity Mask가 앱의 모드별 기대값과 모두 맞을 때만 모드를 반환.
 /// M78: `Option<&'static str>` → `Option<OptimizeMode>`로 격상. 호출처는
 /// `ui::control::mode_label`로 label 변환.
 pub fn query_current_mode(pid: u32) -> Option<super::schedule::OptimizeMode> {
+    let snapshot = query_process_mode_snapshot(pid)?;
+    let info = get_cpu_info();
+    mode_from_priority_and_affinity(snapshot.priority_class, snapshot.affinity_mask, &info)
+}
+
+pub fn query_process_mode_snapshot(pid: u32) -> Option<ProcessModeSnapshot> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid).ok()?;
         let priority = GetPriorityClass(handle);
+        let mut affinity_mask: usize = 0;
+        let mut system_mask: usize = 0;
+        let affinity_ok =
+            GetProcessAffinityMask(handle, &mut affinity_mask, &mut system_mask).is_ok();
         let _ = CloseHandle(handle);
-        priority_class_to_mode(priority)
+        if priority == 0 || !affinity_ok {
+            return None;
+        }
+        Some(ProcessModeSnapshot {
+            priority_class: priority,
+            affinity_mask,
+        })
+    }
+}
+
+pub(super) fn mode_from_priority_and_affinity(
+    priority: u32,
+    affinity: usize,
+    info: &CpuInfo,
+) -> Option<super::schedule::OptimizeMode> {
+    use super::schedule::OptimizeMode;
+    if priority == HIGH_PRIORITY_CLASS.0 && affinity == calc_high_affinity(info) {
+        Some(OptimizeMode::High)
+    } else if priority == NORMAL_PRIORITY_CLASS.0 && affinity == calc_normal_affinity(info) {
+        Some(OptimizeMode::Normal)
+    } else if priority == IDLE_PRIORITY_CLASS.0 && affinity == calc_low_power_affinity(info) {
+        Some(OptimizeMode::LowPower)
+    } else {
+        None
     }
 }
 
 // pure 분류 fn (priority class → OptimizeMode). unsafe 영역 밖에서 단위 테스트로 고정.
+#[cfg(test)]
 pub(super) fn priority_class_to_mode(priority: u32) -> Option<super::schedule::OptimizeMode> {
     use super::schedule::OptimizeMode;
     if priority == HIGH_PRIORITY_CLASS.0 {
@@ -416,6 +474,52 @@ mod tests {
         assert_eq!(priority_class_to_mode(0), None);
         // 알 수 없는 값은 None.
         assert_eq!(priority_class_to_mode(0x4000), None);
+    }
+
+    #[test]
+    fn mode_from_priority_and_affinity_requires_matching_affinity() {
+        let cpu = info(8, 16);
+
+        assert_eq!(
+            mode_from_priority_and_affinity(HIGH_PRIORITY_CLASS.0, 0x5555, &cpu),
+            Some(OptimizeMode::High)
+        );
+        assert_eq!(
+            mode_from_priority_and_affinity(HIGH_PRIORITY_CLASS.0, 0x1555, &cpu),
+            None
+        );
+        assert_eq!(
+            mode_from_priority_and_affinity(NORMAL_PRIORITY_CLASS.0, 0xFFFF, &cpu),
+            Some(OptimizeMode::Normal)
+        );
+        assert_eq!(
+            mode_from_priority_and_affinity(IDLE_PRIORITY_CLASS.0, 0xC000, &cpu),
+            Some(OptimizeMode::LowPower)
+        );
+    }
+
+    #[test]
+    fn non_hybrid_ex_detection_uses_legacy_physical_count() {
+        let cpu = build_cpu_info_from_detection(Some((0x3FFF, 0, 7, 14)), 16, Some(8));
+
+        assert!(!cpu.has_hybrid);
+        assert_eq!(cpu.physical_cores, 8);
+        assert_eq!(cpu.logical_threads, 16);
+        assert_eq!(cpu.p_core_mask, 0);
+        assert_eq!(cpu.e_core_mask, 0);
+        assert_eq!(calc_high_affinity(&cpu), 0x5555);
+    }
+
+    #[test]
+    fn hybrid_ex_detection_preserves_p_and_e_masks() {
+        let cpu = build_cpu_info_from_detection(Some((0xFFFF, 0xFFFF_0000, 24, 32)), 32, Some(16));
+
+        assert!(cpu.has_hybrid);
+        assert_eq!(cpu.physical_cores, 24);
+        assert_eq!(cpu.logical_threads, 32);
+        assert_eq!(cpu.p_core_mask, 0xFFFF);
+        assert_eq!(cpu.e_core_mask, 0xFFFF_0000);
+        assert_eq!(calc_high_affinity(&cpu), 0xFFFF);
     }
 
     fn info(physical: u32, logical: u32) -> CpuInfo {
