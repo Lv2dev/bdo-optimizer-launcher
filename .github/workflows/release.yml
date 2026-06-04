@@ -85,8 +85,13 @@ jobs:
       - name: Cargo test
         run: cargo test --all-targets --locked
 
-      - name: Cargo build --release --locked
-        run: cargo build --release --locked
+      - name: Tauri build (embeds frontend into the exe)
+        # NOTE: bare `cargo build --release` does NOT embed the frontend — it bakes in
+        # the devUrl (http://127.0.0.1:1421), producing an exe that shows
+        # "127.0.0.1 refused to connect". `tauri build` enables custom-protocol asset
+        # embedding so the exe serves the bundled UI from tauri://localhost.
+        # (bundle.active=false in tauri.conf.json, so no installer is produced — exe only.)
+        run: npm run tauri:build
 
       - name: Verify .exe exists
         shell: pwsh
