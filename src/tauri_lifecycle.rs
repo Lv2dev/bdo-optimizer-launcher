@@ -256,6 +256,22 @@ fn auto_low_power_transition(
     }
 }
 
+fn visible_mode_maintenance_action(
+    current_visible: Option<bool>,
+    desired_mode: Option<schedule::OptimizeMode>,
+    current_mode: Option<schedule::OptimizeMode>,
+) -> Option<schedule::OptimizeMode> {
+    if current_visible != Some(true) {
+        return None;
+    }
+    let desired = desired_mode?;
+    if current_mode == Some(desired) {
+        None
+    } else {
+        Some(desired)
+    }
+}
+
 fn start_minimized_requested<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -321,6 +337,56 @@ fn query_game_window_state() -> Option<GameWindowState> {
 
 fn current_game_mode() -> Option<schedule::OptimizeMode> {
     process::find_process_id("BlackDesert64.exe").and_then(process::query_current_mode)
+}
+
+fn log_game_mode_diagnostics(game_state: Option<GameWindowState>) {
+    let Some(game_state) = game_state else {
+        return;
+    };
+    let info = process::get_cpu_info();
+    let snapshot = process::query_process_mode_snapshot(game_state.pid);
+    match snapshot {
+        Some(snapshot) => {
+            tracing::debug!(
+                pid = game_state.pid,
+                foreground_pid = ?window::foreground_process_id(),
+                visible = game_state.visible,
+                priority_class = snapshot.priority_class,
+                affinity = format_args!("{:#x}", snapshot.affinity_mask),
+                expected_high = format_args!("{:#x}", process::calc_high_affinity(&info)),
+                expected_normal = format_args!("{:#x}", process::calc_normal_affinity(&info)),
+                expected_low_power = format_args!("{:#x}", process::calc_low_power_affinity(&info)),
+                "game mode diagnostic tick"
+            );
+        }
+        None => {
+            tracing::debug!(
+                pid = game_state.pid,
+                foreground_pid = ?window::foreground_process_id(),
+                visible = game_state.visible,
+                "game mode diagnostic tick unavailable"
+            );
+        }
+    }
+}
+
+fn apply_visible_mode_maintenance(
+    app: &AppHandle,
+    current_visible: Option<bool>,
+    desired_mode: Option<schedule::OptimizeMode>,
+) {
+    if let Some(mode) =
+        visible_mode_maintenance_action(current_visible, desired_mode, current_game_mode())
+    {
+        let response = tauri_commands::apply_mode_for_lifecycle(mode, false);
+        sync_tray_mode(
+            app,
+            response
+                .control
+                .current_mode
+                .map(schedule::OptimizeMode::from),
+        );
+    }
 }
 
 fn start_auto_low_power_worker(app: AppHandle) {
@@ -391,17 +457,20 @@ fn run_auto_low_power_tick(app: &AppHandle) {
     // M96 P3: 게임 신규 등장 시 기본 모드 자동 적용(auto_tray_on_game_minimize 게이트와 독립).
     apply_default_mode_on_game_launch(app, &state, setting.default_mode);
 
-    // M95: 기능 OFF면 비싼 창 열거(EnumWindows)/프로세스 스캔을 건너뛴다. 다음 ON 전환에서
-    // 오탐 transition이 생기지 않도록 직전 visible 상태만 초기화하고 빠르게 반환한다.
+    let game_state = query_game_window_state();
+    let current_visible = game_state.map(|state| state.visible);
+    log_game_mode_diagnostics(game_state);
+
+    // 자동 저전력 OFF면 hidden/visible 전환은 처리하지 않는다. visible 상태 유지 판단은 계속
+    // 수행하되, 다음 ON 전환에서 오탐 transition이 생기지 않도록 직전 visible 상태만 초기화한다.
     if !setting.auto_tray_on_game_minimize {
         *state
             .previous_game_window_visible
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        apply_visible_mode_maintenance(app, current_visible, setting.last_user_mode);
         return;
     }
-    let game_state = query_game_window_state();
-    let current_visible = game_state.map(|state| state.visible);
     let previous_visible = *state
         .previous_game_window_visible
         .lock()
@@ -423,7 +492,9 @@ fn run_auto_low_power_tick(app: &AppHandle) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = current_visible;
 
     match action {
-        AutoLowPowerAction::Noop => {}
+        AutoLowPowerAction::Noop => {
+            apply_visible_mode_maintenance(app, current_visible, setting.last_user_mode);
+        }
         AutoLowPowerAction::ApplyLowPower => {
             if let Some(game_state) = game_state {
                 if let Some(mode) = process::query_current_mode(game_state.pid) {
@@ -450,6 +521,7 @@ fn run_auto_low_power_tick(app: &AppHandle) {
                 .auto_restore_mode
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            let mode = setting.last_user_mode.unwrap_or(mode);
             let response = tauri_commands::apply_mode_for_lifecycle(mode, false);
             sync_tray_mode(
                 app,
@@ -515,6 +587,36 @@ mod tests {
         assert_eq!(
             auto_low_power_transition(true, Some(false), Some(true), None),
             AutoLowPowerAction::Noop
+        );
+    }
+
+    #[test]
+    fn visible_mode_maintenance_reapplies_last_user_mode_only_when_visible() {
+        use OptimizeMode::{High, LowPower, Normal};
+
+        assert_eq!(
+            visible_mode_maintenance_action(Some(true), Some(High), Some(Normal)),
+            Some(High)
+        );
+        assert_eq!(
+            visible_mode_maintenance_action(Some(true), Some(High), None),
+            Some(High)
+        );
+        assert_eq!(
+            visible_mode_maintenance_action(Some(true), Some(High), Some(High)),
+            None
+        );
+        assert_eq!(
+            visible_mode_maintenance_action(Some(false), Some(High), Some(LowPower)),
+            None
+        );
+        assert_eq!(
+            visible_mode_maintenance_action(None, Some(High), Some(Normal)),
+            None
+        );
+        assert_eq!(
+            visible_mode_maintenance_action(Some(true), None, Some(Normal)),
+            None
         );
     }
 

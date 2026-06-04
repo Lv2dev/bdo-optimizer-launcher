@@ -4,8 +4,8 @@
 
 use windows::Win32::Foundation::{BOOL, FALSE, HWND, LPARAM, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
-    GW_OWNER,
+    EnumWindows, GetForegroundWindow, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
+    IsWindowVisible, GW_OWNER,
 };
 
 struct FindCtx {
@@ -50,4 +50,16 @@ pub fn find_main_window(pid: u32) -> Option<HWND> {
 
 pub fn is_visible(hwnd: HWND) -> bool {
     unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
+pub fn foreground_process_id() -> Option<u32> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        (pid != 0).then_some(pid)
+    }
 }
