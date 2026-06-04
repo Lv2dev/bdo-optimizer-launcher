@@ -116,6 +116,7 @@ jobs:
           path: |
             target/release/bdo-optimizer-launcher.exe
             target/release/SHA256SUMS.txt
+            docs/distribution/manual.pdf
           retention-days: 90
 
       - name: Create GitHub Release
@@ -140,3 +141,4 @@ jobs:
           files: |
             target/release/bdo-optimizer-launcher.exe
             target/release/SHA256SUMS.txt
+            docs/distribution/manual.pdf
