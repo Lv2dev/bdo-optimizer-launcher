@@ -37,7 +37,7 @@ import "pretendard/dist/web/variable/pretendardvariable.css";
 import "./styles.css";
 
 const EMPTY_STATE = {
-  appVersion: "0.1.2",
+  appVersion: "0.1.3",
   status: {
     current: "초기화 중입니다.",
     previous: "",
@@ -81,7 +81,7 @@ const EMPTY_STATE = {
     available: false,
     checking: false,
     releaseUrl: "",
-    appVersion: "0.1.2",
+    appVersion: "0.1.3",
     latestVersion: null,
   },
   monitor: {

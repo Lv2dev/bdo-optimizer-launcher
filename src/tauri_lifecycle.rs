@@ -248,6 +248,7 @@ fn auto_low_power_transition(
         return AutoLowPowerAction::Noop;
     }
     match (previous_visible, current_visible) {
+        (None, Some(false)) => AutoLowPowerAction::ApplyLowPower,
         (Some(true), Some(false)) => AutoLowPowerAction::ApplyLowPower,
         (Some(false), Some(true)) => restore_mode
             .map(AutoLowPowerAction::Restore)
@@ -567,6 +568,14 @@ mod tests {
         assert_eq!(
             auto_low_power_transition(true, Some(true), Some(false), None),
             AutoLowPowerAction::ApplyLowPower
+        );
+        assert_eq!(
+            auto_low_power_transition(true, None, Some(false), None),
+            AutoLowPowerAction::ApplyLowPower
+        );
+        assert_eq!(
+            auto_low_power_transition(true, None, Some(true), None),
+            AutoLowPowerAction::Noop
         );
         assert_eq!(
             auto_low_power_transition(true, Some(false), Some(false), None),
