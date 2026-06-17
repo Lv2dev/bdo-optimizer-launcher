@@ -41,6 +41,12 @@ pub const UPDATE_CHECK_INTERVAL_OPTIONS_MS: [u32; 5] = [
     UPDATE_CHECK_INTERVAL_7D_MS,
 ];
 
+pub const ACCENT_PALETTE_COUNT: u32 = 4;
+
+pub fn is_supported_accent_palette(palette: u32) -> bool {
+    palette < ACCENT_PALETTE_COUNT
+}
+
 // M96 P3: 모니터 폴링 기본 간격(ms). 기존 고정값 1초와 동일하게 둔다.
 fn default_monitor_interval() -> u32 {
     1000
@@ -58,6 +64,8 @@ pub fn is_supported_update_check_interval_ms(ms: u32) -> bool {
 pub struct AppSettings {
     #[serde(default)]
     pub theme_mode: ThemeMode,
+    #[serde(default)]
+    pub accent_palette: u32,
     #[serde(default)]
     pub reduce_motion: bool,
     #[serde(default)]
@@ -93,6 +101,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeMode::default(),
+            accent_palette: 0,
             reduce_motion: false,
             launcher_path: String::new(),
             auto_tray_on_game_minimize: false,
@@ -248,6 +257,26 @@ mod tests {
         assert!(settings.update_alert_enabled);
         assert_eq!(86_400_000, settings.update_check_interval_ms);
         assert_eq!(None, settings.last_update_notified_version);
+    }
+
+    #[test]
+    fn app_settings_round_trips_accent_palette() {
+        let settings = AppSettings {
+            accent_palette: 2,
+            ..AppSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(2, restored.accent_palette);
+    }
+
+    #[test]
+    fn app_settings_defaults_accent_palette_to_zero() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme_mode":"dark"}"#).unwrap();
+
+        assert_eq!(0, settings.accent_palette);
     }
 
     #[test]

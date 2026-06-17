@@ -166,6 +166,7 @@ pub enum ThemeModeDto {
 pub struct SettingsStateDto {
     pub theme_mode: ThemeModeDto,
     pub effective_dark: bool,
+    pub accent_palette: u32,
     pub reduce_motion: bool,
     pub auto_tray_on_game_minimize: bool,
     pub close_to_tray: bool,
@@ -190,6 +191,7 @@ pub struct SettingsCommandResponseDto {
 #[serde(rename_all = "snake_case")]
 pub enum SettingKeyDto {
     ThemeMode,
+    AccentPalette,
     ReduceMotion,
     AutoTrayOnGameMinimize,
     CloseToTray,
@@ -467,6 +469,11 @@ fn settings_state(
     SettingsStateDto {
         theme_mode: ThemeModeDto::from(loaded.theme_mode),
         effective_dark: settings::resolve_dark_mode(loaded.theme_mode),
+        accent_palette: if settings::is_supported_accent_palette(loaded.accent_palette) {
+            loaded.accent_palette
+        } else {
+            0
+        },
         reduce_motion: loaded.reduce_motion,
         auto_tray_on_game_minimize: loaded.auto_tray_on_game_minimize,
         close_to_tray: loaded.close_to_tray,
@@ -485,6 +492,7 @@ fn settings_state_for_test() -> SettingsStateDto {
     SettingsStateDto {
         theme_mode: ThemeModeDto::System,
         effective_dark: false,
+        accent_palette: 0,
         reduce_motion: false,
         auto_tray_on_game_minimize: false,
         close_to_tray: false,
@@ -914,6 +922,10 @@ fn validate_setting_input(input: &SettingInputDto) -> Result<(), String> {
             .theme_mode
             .map(|_| ())
             .ok_or_else(|| "themeMode 값을 입력하세요.".to_string()),
+        SettingKeyDto::AccentPalette => match input.int_value {
+            Some(palette) if settings::is_supported_accent_palette(palette) => Ok(()),
+            _ => Err("액센트 색상 값이 올바르지 않습니다.".to_string()),
+        },
         SettingKeyDto::LauncherPath => input
             .string_value
             .as_deref()
@@ -1317,6 +1329,12 @@ pub fn set_setting(input: SettingInputDto) -> SettingsCommandResponseDto {
             loaded.theme_mode = settings::ThemeMode::from(input.theme_mode.unwrap());
             settings::save_settings(&loaded);
             "테마 설정을 저장했습니다.".to_string()
+        }
+        SettingKeyDto::AccentPalette => {
+            let mut loaded = settings::load_settings();
+            loaded.accent_palette = input.int_value.unwrap();
+            settings::save_settings(&loaded);
+            "액센트 색상을 저장했습니다.".to_string()
         }
         SettingKeyDto::ReduceMotion => {
             let mut loaded = settings::load_settings();
@@ -1812,6 +1830,7 @@ mod tests {
         state.auto_tray_on_game_minimize = true;
         state.close_to_tray = true;
         state.autostart_enabled = true;
+        state.accent_palette = 2;
         state.launcher_path = r"C:\Pearlabyss\BlackDesert\BlackDesertLauncher.exe".to_string();
 
         let value = serde_json::to_value(state).unwrap();
@@ -1821,6 +1840,7 @@ mod tests {
             json!({
                 "themeMode": "system",
                 "effectiveDark": true,
+                "accentPalette": 2,
                 "reduceMotion": false,
                 "autoTrayOnGameMinimize": true,
                 "closeToTray": true,
@@ -1912,6 +1932,25 @@ mod tests {
         assert!(validate_setting_input_for_test(&make(Some(259_200_000))).is_ok());
         assert!(validate_setting_input_for_test(&make(Some(604_800_000))).is_ok());
         assert!(validate_setting_input_for_test(&make(Some(3_600_000))).is_err());
+        assert!(validate_setting_input_for_test(&make(None)).is_err());
+    }
+
+    #[test]
+    fn accent_palette_accepts_only_supported_values() {
+        let make = |palette: Option<u32>| SettingInputDto {
+            key: SettingKeyDto::AccentPalette,
+            theme_mode: None,
+            bool_value: None,
+            string_value: None,
+            default_mode: None,
+            int_value: palette,
+        };
+
+        assert!(validate_setting_input_for_test(&make(Some(0))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(1))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(2))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(3))).is_ok());
+        assert!(validate_setting_input_for_test(&make(Some(4))).is_err());
         assert!(validate_setting_input_for_test(&make(None)).is_err());
     }
 
@@ -2163,6 +2202,16 @@ mod tests {
         assert_eq!(value["update"]["available"], false);
         assert_eq!(value["monitor"]["totals"]["ramMb"], 16384);
         assert_eq!(value["monitor"]["systemInfo"]["gpuName"], "GPU");
+    }
+
+    #[test]
+    fn initial_update_state_uses_default_release_channel() {
+        let state = initial_update_state();
+
+        assert_eq!(state.status_text, "업데이트 확인 전.");
+        assert!(!state.available);
+        assert!(!state.checking);
+        assert_eq!(state.release_url, "");
     }
 
     #[test]
