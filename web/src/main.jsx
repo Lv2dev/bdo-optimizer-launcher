@@ -37,7 +37,7 @@ import "pretendard/dist/web/variable/pretendardvariable.css";
 import "./styles.css";
 
 const EMPTY_STATE = {
-  appVersion: "0.1.3",
+  appVersion: "0.1.4",
   status: {
     current: "초기화 중입니다.",
     previous: "",
@@ -65,6 +65,7 @@ const EMPTY_STATE = {
   settings: {
     themeMode: "system",
     effectiveDark: true,
+    accentPalette: 0,
     reduceMotion: false,
     autoTrayOnGameMinimize: false,
     closeToTray: true,
@@ -77,11 +78,11 @@ const EMPTY_STATE = {
     updateCheckIntervalMs: 86400000,
   },
   update: {
-    statusText: "업데이트 채널 미설정.",
+    statusText: "업데이트 확인 전.",
     available: false,
     checking: false,
     releaseUrl: "",
-    appVersion: "0.1.3",
+    appVersion: "0.1.4",
     latestVersion: null,
   },
   monitor: {
@@ -189,6 +190,11 @@ const ACCENTS = [
 ];
 
 const ACCENT_NAMES = ["청록", "골드", "인디고", "마젠타"];
+
+function normalizeAccentPalette(value) {
+  const asNumber = Number(value);
+  return Number.isInteger(asNumber) && asNumber >= 0 && asNumber < ACCENTS.length ? asNumber : 0;
+}
 
 let previewRules = [];
 let previewShutdown = EMPTY_STATE.shutdown;
@@ -450,6 +456,11 @@ function browserPreviewPayload(command, args) {
         ...previewSettings,
         monitorIntervalMs: input.intValue ?? 1000,
       };
+    } else if (input.key === "accent_palette") {
+      previewSettings = {
+        ...previewSettings,
+        accentPalette: normalizeAccentPalette(input.intValue),
+      };
     } else if (input.key === "update_check_interval") {
       previewSettings = {
         ...previewSettings,
@@ -485,31 +496,33 @@ function browserPreviewPayload(command, args) {
   }
 
   if (command === "check_for_updates") {
+    const currentVersion = previewUpdate.appVersion || EMPTY_STATE.appVersion;
     previewUpdate = {
       ...previewUpdate,
-      statusText: "업데이트 채널 미설정.",
+      statusText: `최신 버전입니다. (${currentVersion})`,
       available: false,
       checking: false,
-      releaseUrl: "",
-      latestVersion: null,
+      releaseUrl: "https://github.com/Lv2dev/bdo-optimizer-launcher/releases/latest",
+      latestVersion: currentVersion,
     };
     return {
-      status: { current: "업데이트 채널이 설정되지 않았습니다.", previous: "" },
+      status: { current: previewUpdate.statusText, previous: "" },
       update: previewUpdate,
     };
   }
 
   if (command === "check_update_alert") {
+    const currentVersion = previewUpdate.appVersion || EMPTY_STATE.appVersion;
     previewUpdate = {
       ...previewUpdate,
-      statusText: "업데이트 채널 미설정.",
+      statusText: `최신 버전입니다. (${currentVersion})`,
       available: false,
       checking: false,
-      releaseUrl: "",
-      latestVersion: null,
+      releaseUrl: "https://github.com/Lv2dev/bdo-optimizer-launcher/releases/latest",
+      latestVersion: currentVersion,
     };
     return {
-      status: { current: "업데이트 채널이 설정되지 않았습니다.", previous: "" },
+      status: { current: previewUpdate.statusText, previous: "" },
       update: previewUpdate,
       shouldAlert: false,
       alertText: "",
@@ -1698,17 +1711,18 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
         </p>
         <div className="accent-grid">
           {ACCENTS.map((palette, index) => {
-            const active = String(accArr[0]).toLowerCase() === String(palette[0]).toLowerCase();
+            const active = normalizeAccentPalette(settings.accentPalette) === index;
             return (
               <button
                 type="button"
                 key={palette[0]}
                 className={`accent-swatch${active ? " on" : ""}`}
                 aria-pressed={active}
+                disabled={!canRunCommand}
                 title={ACCENT_NAMES[index]}
                 onClick={() => {
                   onAccent(palette);
-                  showToast(`${ACCENT_NAMES[index]} 액센트 적용`);
+                  setSetting("accent_palette", { intValue: index });
                 }}
               >
                 <span className="sw-colors">
@@ -2098,6 +2112,15 @@ function App() {
     body.style.setProperty("--frost", String(GLASS_THEME.frost));
     body.style.setProperty("--radius", `${GLASS_THEME.radius}px`);
   }, [accent, state.settings.effectiveDark, state.settings.reduceMotion]);
+
+  useEffect(() => {
+    const palette = ACCENTS[normalizeAccentPalette(state.settings.accentPalette)];
+    setAccent((current) => {
+      const currentFirst = String(current?.[0] ?? "").toLowerCase();
+      const nextFirst = String(palette[0]).toLowerCase();
+      return currentFirst === nextFirst ? current : palette;
+    });
+  }, [state.settings.accentPalette]);
 
   useEffect(() => {
     runCommand("init", "get_app_state", undefined, false);

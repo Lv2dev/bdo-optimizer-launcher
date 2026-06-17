@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+const DEFAULT_GITHUB_REPOSITORY: &str = "Lv2dev/bdo-optimizer-launcher";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatestRelease {
     pub tag_name: String,
@@ -51,10 +53,9 @@ pub fn release_api_url(
 ) -> Option<String> {
     if let Some(url) = explicit_url {
         let trimmed = url.trim();
-        if trimmed.is_empty() {
-            return None;
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
-        return Some(trimmed.to_string());
     }
     github_repository
         .map(str::trim)
@@ -63,7 +64,10 @@ pub fn release_api_url(
 }
 
 pub fn configured_release_api_url() -> Option<String> {
-    release_api_url(option_env!("UPDATE_RELEASES_API_URL"), None)
+    release_api_url(
+        option_env!("UPDATE_RELEASES_API_URL"),
+        Some(DEFAULT_GITHUB_REPOSITORY),
+    )
 }
 
 fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
@@ -190,7 +194,21 @@ mod tests {
             Some("https://api.github.com/repos/owner/repo/releases/latest".to_string())
         );
         assert_eq!(release_api_url(None, None), None);
-        assert_eq!(release_api_url(Some("   "), Some("owner/repo")), None);
+        assert_eq!(
+            release_api_url(Some("   "), Some("owner/repo")),
+            Some("https://api.github.com/repos/owner/repo/releases/latest".to_string())
+        );
+    }
+
+    #[test]
+    fn configured_release_api_url_defaults_to_public_repository() {
+        assert_eq!(
+            configured_release_api_url(),
+            Some(
+                "https://api.github.com/repos/Lv2dev/bdo-optimizer-launcher/releases/latest"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
