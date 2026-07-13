@@ -23,6 +23,25 @@ const PRESENT_START_EVENT_ID: u16 = 42;
 const PRESENT_EVENT_TTL: Duration = Duration::from_secs(1);
 
 const SESSION_NAME: &str = "bdo-optimizer-fps";
+static START_CLAIM_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) struct StartClaim(u64);
+
+fn advance_start_claim(generation: &AtomicU64) -> u64 {
+    generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+}
+
+fn start_claim_is_current(generation: &AtomicU64, claim: u64) -> bool {
+    generation.load(Ordering::Acquire) == claim
+}
+
+pub(crate) fn claim_start() -> StartClaim {
+    StartClaim(advance_start_claim(&START_CLAIM_GENERATION))
+}
+
+pub(crate) fn invalidate_start_claims() {
+    advance_start_claim(&START_CLAIM_GENERATION);
+}
 
 struct SessionOwner<T> {
     generation: u64,
@@ -40,19 +59,23 @@ impl<T> Default for SessionOwner<T> {
 
 fn replace_owned_session<T, E>(
     owner: &Mutex<SessionOwner<T>>,
+    claim_is_current: impl FnOnce() -> bool,
     stop: impl FnOnce(T),
     start: impl FnOnce() -> Result<T, E>,
-) -> Result<u64, E> {
+) -> Result<Option<u64>, E> {
     let mut owner = owner
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !claim_is_current() {
+        return Ok(None);
+    }
     owner.generation = owner.generation.wrapping_add(1);
     let generation = owner.generation;
     if let Some(previous) = owner.session.take() {
         stop(previous);
     }
     owner.session = Some(start()?);
-    Ok(generation)
+    Ok(Some(generation))
 }
 
 fn stop_owned_session<T>(owner: &Mutex<SessionOwner<T>>, generation: u64, stop: impl FnOnce(T)) {
@@ -78,6 +101,8 @@ fn session_owner() -> &'static Mutex<SessionOwner<UserTrace>> {
 pub enum Error {
     #[error("ETW 세션 시작 실패: {0}")]
     EtwStart(String),
+    #[error("ETW 세션 시작 요청이 최신 요청으로 대체되었습니다.")]
+    StaleStart,
 }
 
 // 이전 앱 인스턴스가 비정상 종료(강제 종료/패닉/디버거 stop 등)되면 같은 이름의
@@ -101,7 +126,7 @@ struct CallbackState {
 }
 
 impl FpsSession {
-    pub fn start(target_pid: u32) -> Result<Self, Error> {
+    pub(crate) fn start(target_pid: u32, claim: StartClaim) -> Result<Self, Error> {
         let timestamps = Arc::new(Mutex::new(VecDeque::with_capacity(256)));
         let total_events = Arc::new(AtomicU64::new(0));
         let present_events = Arc::new(AtomicU64::new(0));
@@ -131,14 +156,20 @@ impl FpsSession {
             })
             .build();
 
-        let generation = replace_owned_session(session_owner(), drop, || {
-            stop_stale_session();
-            UserTrace::new()
-                .named(SESSION_NAME.to_string())
-                .enable(provider)
-                .start_and_process()
-                .map_err(|e| Error::EtwStart(format!("{:?}", e)))
-        })?;
+        let generation = replace_owned_session(
+            session_owner(),
+            || start_claim_is_current(&START_CLAIM_GENERATION, claim.0),
+            drop,
+            || {
+                stop_stale_session();
+                UserTrace::new()
+                    .named(SESSION_NAME.to_string())
+                    .enable(provider)
+                    .start_and_process()
+                    .map_err(|e| Error::EtwStart(format!("{:?}", e)))
+            },
+        )?
+        .ok_or(Error::StaleStart)?;
 
         Ok(Self {
             timestamps,
@@ -187,6 +218,8 @@ fn prune_and_count(timestamps: &mut VecDeque<Instant>, now: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -214,10 +247,13 @@ mod tests {
     #[test]
     fn stale_session_drop_cannot_stop_the_latest_named_trace() {
         let owner = Mutex::new(SessionOwner::<&'static str>::default());
+        let latest_claim = AtomicU64::new(0);
         let stopped = Mutex::new(Vec::new());
 
+        let first_claim = advance_start_claim(&latest_claim);
         let first = replace_owned_session(
             &owner,
+            || start_claim_is_current(&latest_claim, first_claim),
             |trace| {
                 assert!(matches!(
                     owner.try_lock(),
@@ -236,9 +272,12 @@ mod tests {
                 Ok::<_, ()>("first")
             },
         )
+        .unwrap()
         .unwrap();
+        let second_claim = advance_start_claim(&latest_claim);
         let second = replace_owned_session(
             &owner,
+            || start_claim_is_current(&latest_claim, second_claim),
             |trace| {
                 assert!(matches!(
                     owner.try_lock(),
@@ -257,6 +296,7 @@ mod tests {
                 Ok::<_, ()>("second")
             },
         )
+        .unwrap()
         .unwrap();
 
         stop_owned_session(&owner, first, |trace| {
@@ -285,5 +325,99 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             ["first", "second"]
         );
+    }
+
+    #[test]
+    fn late_stale_start_cannot_replace_the_latest_claimed_session() {
+        let owner = Arc::new(Mutex::new(SessionOwner::<&'static str>::default()));
+        let latest_claim = Arc::new(AtomicU64::new(0));
+        let stopped = Arc::new(Mutex::new(Vec::new()));
+        let stale_ready = Arc::new(Barrier::new(2));
+        let release_stale = Arc::new(Barrier::new(2));
+
+        let stale_claim = advance_start_claim(&latest_claim);
+        let stale_owner = Arc::clone(&owner);
+        let stale_latest_claim = Arc::clone(&latest_claim);
+        let stale_stopped = Arc::clone(&stopped);
+        let stale_ready_worker = Arc::clone(&stale_ready);
+        let release_stale_worker = Arc::clone(&release_stale);
+        let stale_worker = thread::spawn(move || {
+            stale_ready_worker.wait();
+            release_stale_worker.wait();
+            replace_owned_session(
+                &stale_owner,
+                || start_claim_is_current(&stale_latest_claim, stale_claim),
+                |trace| {
+                    stale_stopped
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(trace);
+                },
+                || Ok::<_, ()>("stale"),
+            )
+        });
+
+        stale_ready.wait();
+        advance_start_claim(&latest_claim); // stop/invalidate
+        let current_claim = advance_start_claim(&latest_claim);
+        let current_generation = replace_owned_session(
+            &owner,
+            || start_claim_is_current(&latest_claim, current_claim),
+            |trace| {
+                stopped
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(trace);
+            },
+            || Ok::<_, ()>("latest"),
+        )
+        .unwrap()
+        .expect("latest claim must start");
+
+        release_stale.wait();
+        assert_eq!(stale_worker.join().unwrap().unwrap(), None);
+        assert_eq!(
+            owner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .session,
+            Some("latest")
+        );
+        assert!(stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+
+        stop_owned_session(&owner, current_generation, drop);
+    }
+
+    #[test]
+    fn invalidated_start_claim_cannot_mutate_an_empty_owner() {
+        let owner = Mutex::new(SessionOwner::<&'static str>::default());
+        let latest_claim = AtomicU64::new(0);
+        let stop_calls = std::cell::Cell::new(0);
+        let start_calls = std::cell::Cell::new(0);
+        let stale_claim = advance_start_claim(&latest_claim);
+        advance_start_claim(&latest_claim);
+
+        let result = replace_owned_session(
+            &owner,
+            || start_claim_is_current(&latest_claim, stale_claim),
+            |_| stop_calls.set(stop_calls.get() + 1),
+            || {
+                start_calls.set(start_calls.get() + 1);
+                Ok::<_, ()>("stale")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        assert_eq!(stop_calls.get(), 0);
+        assert_eq!(start_calls.get(), 0);
+        let owner = owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(owner.generation, 0);
+        assert_eq!(owner.session, None);
     }
 }

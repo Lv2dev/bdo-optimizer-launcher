@@ -936,7 +936,7 @@ fn read_monitor_snapshot() -> MonitorStateDto {
                 runtime.fps_starting = true;
                 runtime.fps_generation = runtime.fps_generation.wrapping_add(1);
                 runtime.fps_retry = None;
-                start_claim = Some((pid, runtime.fps_generation));
+                start_claim = Some((pid, runtime.fps_generation, fps::claim_start()));
             }
 
             let total_ram_mb = runtime.monitor.total_ram_mb;
@@ -967,6 +967,9 @@ fn read_monitor_snapshot() -> MonitorStateDto {
                 },
             })
         } else {
+            if runtime.fps_pid.is_some() || runtime.fps_starting || runtime.fps_session.is_some() {
+                fps::invalidate_start_claims();
+            }
             runtime.monitor.rebind(None);
             detached_session = runtime.fps_session.take();
             runtime.fps_pid = None;
@@ -982,8 +985,8 @@ fn read_monitor_snapshot() -> MonitorStateDto {
     };
 
     drop(detached_session);
-    if let Some((pid, generation)) = start_claim {
-        let started = fps::FpsSession::start(pid).ok();
+    if let Some((pid, generation, owner_claim)) = start_claim {
+        let started = fps::FpsSession::start(pid, owner_claim).ok();
         let mut stale_session = None;
         {
             let mut runtime = runtime_mutex
@@ -1396,6 +1399,7 @@ fn stop_monitor_session_blocking() {
         let mut runtime = runtime
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        fps::invalidate_start_claims();
         runtime.fps_pid = None;
         runtime.fps_starting = false;
         runtime.fps_generation = runtime.fps_generation.wrapping_add(1);

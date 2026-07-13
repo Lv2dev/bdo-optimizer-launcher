@@ -20,6 +20,8 @@ pub enum Error {
     RegisterWeeklyFailed,
     #[error("이미 등록된 예약이 없습니다.")]
     TaskNotFound,
+    #[error("예약 작업 조회 실패. Task Scheduler 상태와 관리자 권한을 확인하세요. ({0})")]
+    TaskQueryFailed(String),
     #[error("예약 취소 실패. 관리자 권한을 확인하세요. ({0})")]
     DeleteFailed(String),
     #[error("Windows 지역 설정에 맞는 예약 날짜 변환 실패: {0}")]
@@ -74,7 +76,10 @@ pub fn register_once_shutdown(date: &str, time: &str) -> Result<(), Error> {
         .status
         .success();
 
-    if ok && task_exists(TASK_ONCE) {
+    if !ok {
+        return Err(Error::RegisterOnceFailed);
+    }
+    if task_exists(TASK_ONCE)? {
         Ok(())
     } else {
         Err(Error::RegisterOnceFailed)
@@ -108,26 +113,60 @@ pub fn register_weekly_shutdown(days: &[&str], time: &str) -> Result<(), Error> 
         .status
         .success();
 
-    if ok && task_exists(TASK_WEEKLY) {
+    if !ok {
+        return Err(Error::RegisterWeeklyFailed);
+    }
+    if task_exists(TASK_WEEKLY)? {
         Ok(())
     } else {
         Err(Error::RegisterWeeklyFailed)
     }
 }
 
-fn task_exists(name: &str) -> bool {
-    schtasks_cmd()
-        .args(["/query", "/tn", name])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+fn task_file_path(name: &str) -> std::path::PathBuf {
+    super::system32_path("Tasks").join(name)
+}
+
+fn task_presence_from_query(
+    query_succeeded: bool,
+    task_file_exists: Result<bool, String>,
+    detail: String,
+) -> Result<bool, Error> {
+    if query_succeeded {
+        return Ok(true);
+    }
+    match task_file_exists {
+        Ok(false) => Ok(false),
+        Ok(true) => Err(Error::TaskQueryFailed(detail)),
+        Err(file_error) => Err(Error::TaskQueryFailed(format!(
+            "{detail}; 작업 파일 확인 실패: {file_error}"
+        ))),
+    }
+}
+
+fn task_exists(name: &str) -> Result<bool, Error> {
+    let out = schtasks_cmd().args(["/query", "/tn", name]).output()?;
+    let detail = {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let detail = format!("{}{}", stdout.trim(), stderr.trim());
+        if detail.is_empty() {
+            "schtasks /query가 비정상 종료했습니다.".to_string()
+        } else {
+            detail
+        }
+    };
+    let task_file_exists = task_file_path(name)
+        .try_exists()
+        .map_err(|error| error.to_string());
+    task_presence_from_query(out.status.success(), task_file_exists, detail)
 }
 
 fn delete_with_precheck(
-    exists: impl FnOnce() -> bool,
+    exists: impl FnOnce() -> Result<bool, Error>,
     delete: impl FnOnce() -> Result<(), Error>,
 ) -> Result<(), Error> {
-    if !exists() {
+    if !exists()? {
         return Err(Error::TaskNotFound);
     }
     delete()
@@ -471,7 +510,7 @@ mod tests {
     fn delete_task_precheck_skips_delete_when_task_is_missing() {
         let delete_calls = std::cell::Cell::new(0);
         let missing = delete_with_precheck(
-            || false,
+            || Ok(false),
             || {
                 delete_calls.set(delete_calls.get() + 1);
                 Ok(())
@@ -481,7 +520,7 @@ mod tests {
         assert_eq!(delete_calls.get(), 0);
 
         let existing = delete_with_precheck(
-            || true,
+            || Ok(true),
             || {
                 delete_calls.set(delete_calls.get() + 1);
                 Ok(())
@@ -489,6 +528,49 @@ mod tests {
         );
         assert!(existing.is_ok());
         assert_eq!(delete_calls.get(), 1);
+    }
+
+    #[test]
+    fn delete_task_precheck_propagates_query_failure_without_deleting() {
+        let delete_calls = std::cell::Cell::new(0);
+        let result = delete_with_precheck(
+            || {
+                Err(Error::TaskQueryFailed(
+                    "Task Scheduler service unavailable".into(),
+                ))
+            },
+            || {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(Error::TaskQueryFailed(_))));
+        assert_eq!(delete_calls.get(), 0);
+    }
+
+    #[test]
+    fn failed_query_requires_task_file_absence_to_confirm_missing_task() {
+        assert!(matches!(
+            task_presence_from_query(false, Ok(false), "query failed".into()),
+            Ok(false)
+        ));
+        assert!(matches!(
+            task_presence_from_query(false, Ok(true), "query failed".into()),
+            Err(Error::TaskQueryFailed(_))
+        ));
+        assert!(matches!(
+            task_presence_from_query(
+                false,
+                Err("task file metadata denied".into()),
+                "query failed".into()
+            ),
+            Err(Error::TaskQueryFailed(_))
+        ));
+        assert!(matches!(
+            task_presence_from_query(true, Err("unused".into()), String::new()),
+            Ok(true)
+        ));
     }
 
     #[test]

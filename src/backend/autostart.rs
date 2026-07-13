@@ -67,18 +67,45 @@ fn schtasks_cmd() -> std::process::Command {
     super::system_command("schtasks.exe")
 }
 
-fn task_exists() -> bool {
-    schtasks_cmd()
-        .args(["/query", "/tn", TASK_NAME])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-}
-
 fn task_file_path() -> PathBuf {
     super::windows_path("System32")
         .join("Tasks")
         .join(TASK_NAME)
+}
+
+fn task_presence_from_query(
+    query_succeeded: bool,
+    task_file_exists: Result<bool, String>,
+    detail: String,
+) -> Result<bool, Error> {
+    if query_succeeded {
+        return Ok(true);
+    }
+    match task_file_exists {
+        Ok(false) => Ok(false),
+        Ok(true) => Err(Error::UnregisterFailed(format!("작업 조회 실패: {detail}"))),
+        Err(file_error) => Err(Error::UnregisterFailed(format!(
+            "작업 조회 실패: {detail}; 작업 파일 확인 실패: {file_error}"
+        ))),
+    }
+}
+
+fn task_exists() -> Result<bool, Error> {
+    let out = schtasks_cmd().args(["/query", "/tn", TASK_NAME]).output()?;
+    let detail = {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let detail = format!("{}{}", stdout.trim(), stderr.trim());
+        if detail.is_empty() {
+            "schtasks /query가 비정상 종료했습니다.".to_string()
+        } else {
+            detail
+        }
+    };
+    let task_file_exists = task_file_path()
+        .try_exists()
+        .map_err(|error| error.to_string());
+    task_presence_from_query(out.status.success(), task_file_exists, detail)
 }
 
 fn task_deletion_is_confirmed(query_succeeded: bool, task_file_exists: bool) -> bool {
@@ -113,10 +140,10 @@ fn verify_registration_with(
 }
 
 fn unregister_with(
-    exists: impl FnOnce() -> bool,
+    exists: impl FnOnce() -> Result<bool, Error>,
     delete: impl FnOnce() -> Result<(), Error>,
 ) -> Result<(), Error> {
-    require_existing_task(exists())?;
+    require_existing_task(exists()?)?;
     delete()
 }
 
@@ -749,7 +776,7 @@ mod tests {
         let delete_calls = std::cell::Cell::new(0);
         assert!(matches!(
             unregister_with(
-                || false,
+                || Ok(false),
                 || {
                     delete_calls.set(delete_calls.get() + 1);
                     Ok(())
@@ -759,7 +786,7 @@ mod tests {
         ));
         assert_eq!(delete_calls.get(), 0);
         assert!(unregister_with(
-            || true,
+            || Ok(true),
             || {
                 delete_calls.set(delete_calls.get() + 1);
                 Ok(())
@@ -772,6 +799,45 @@ mod tests {
         assert!(registration_matches(true, true, true));
         assert!(!registration_matches(false, true, true));
         assert!(!registration_matches(true, false, true));
+    }
+
+    #[test]
+    fn unregister_precheck_propagates_query_failure_without_deleting() {
+        let delete_calls = std::cell::Cell::new(0);
+        let result = unregister_with(
+            || Err(Error::UnregisterFailed("Task Scheduler unavailable".into())),
+            || {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(Error::UnregisterFailed(_))));
+        assert_eq!(delete_calls.get(), 0);
+    }
+
+    #[test]
+    fn failed_autostart_query_requires_task_file_absence_to_confirm_missing() {
+        assert!(matches!(
+            task_presence_from_query(false, Ok(false), "query failed".into()),
+            Ok(false)
+        ));
+        assert!(matches!(
+            task_presence_from_query(false, Ok(true), "query failed".into()),
+            Err(Error::UnregisterFailed(_))
+        ));
+        assert!(matches!(
+            task_presence_from_query(
+                false,
+                Err("task file metadata denied".into()),
+                "query failed".into()
+            ),
+            Err(Error::UnregisterFailed(_))
+        ));
+        assert!(matches!(
+            task_presence_from_query(true, Err("unused".into()), String::new()),
+            Ok(true)
+        ));
     }
 
     #[test]
