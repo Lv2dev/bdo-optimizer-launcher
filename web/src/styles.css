@@ -2347,7 +2347,19 @@ body[data-mode="light"] .accent-swatch {
   white-space: nowrap;
 }
 
-.statusbar > span:nth-child(2) {
+.pending-spinner {
+  width: 13px;
+  height: 13px;
+  animation: pending-spin 0.8s linear infinite;
+}
+
+@keyframes pending-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.status-message {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

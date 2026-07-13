@@ -31,7 +31,8 @@ const checks = [
     pass: main.includes("function GlassSelect")
       && main.includes("<GlassSelect")
       && main.includes('className="field"')
-      && main.includes("예약 취소"),
+      && main.includes("단발 취소")
+      && main.includes("매주 취소"),
   },
   {
     name: "settings tab keeps vertical theme cards and accent swatches",
@@ -39,7 +40,8 @@ const checks = [
       && settingsTab.includes("accent-grid")
       && settingsTab.includes("accent-swatch")
       && settingsTab.includes('className="path-field readonly"')
-      && settingsTab.includes("onAccent(palette)")
+      && settingsTab.includes('setSetting("accent_palette"')
+      && !settingsTab.includes("onAccent(palette)")
       && main.includes("앱 표시 색상을 변경합니다."),
   },
   {
