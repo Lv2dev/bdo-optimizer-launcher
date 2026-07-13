@@ -41,6 +41,7 @@ function Assert-CommonControlsV6([string]$text, [string]$name) {
 
 $release = Read-RootFile ".github\workflows\release.yml"
 $ci = Read-RootFile ".github\workflows\ci.yml"
+$gitAttributes = Read-RootFile ".gitattributes"
 $readme = Read-RootFile "README.md"
 $manifest = Read-RootFile "app.manifest"
 $devManifest = Read-RootFile "app.dev.manifest"
@@ -58,6 +59,10 @@ $installerAclGuard = Read-RootFile "scripts\installer_acl_guard.ps1"
 
 Assert-CommonControlsV6 $manifest "app.manifest"
 Assert-CommonControlsV6 $devManifest "app.dev.manifest"
+$normalizedGitAttributes = $gitAttributes.Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd([char[]]"`n")
+if ($normalizedGitAttributes -cne "docs/distribution/manual.html text eol=lf") {
+    throw "manual.html must have one deterministic LF line-ending attribute"
+}
 function Assert-ExecutionLevel([string]$text, [string]$expected, [string]$name) {
     [xml]$xml = $text
     $nodes = @($xml.SelectNodes("//*[local-name()='requestedExecutionLevel']"))

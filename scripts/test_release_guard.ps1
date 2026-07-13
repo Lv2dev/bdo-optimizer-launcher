@@ -23,6 +23,7 @@ if (Test-SddlDangerousUntrustedAce "O:BAD:(A;IO;GA;;;BU)" @("S-1-5-32-545")) {
 
 $fixture = Join-Path $env:TEMP ("bdo-release-guard-" + [Guid]::NewGuid().ToString("N"))
 $files = @(
+    ".gitattributes",
     ".github\workflows\release.yml",
     ".github\workflows\ci.yml",
     "scripts\check_release_workflow.ps1",
@@ -98,6 +99,8 @@ try {
     Assert-MutationRejected "app.manifest" 'level="requireAdministrator"' 'level="asInvoker"'
     Assert-MutationRejected "app.dev.manifest" 'level="asInvoker"' 'level="requireAdministrator"'
     Assert-MutationRejected "package.json" '"tauri:build":\s*"tauri build"' '"tauri:build": "cargo build --release"'
+    Assert-MutationRejected ".gitattributes" '(?m)^docs/distribution/manual\.html text eol=lf\r?$' 'docs/distribution/manual.html text eol=crlf'
+    Assert-MutationRejected ".gitattributes" '(?m)^docs/distribution/manual\.html text eol=lf\r?$' "docs/distribution/manual.html text eol=lf`r`ndocs/distribution/manual.html text eol=crlf"
     Assert-MutationRejected "package.json" '"@tauri-apps/cli":\s*"2\.11\.2"' '"@tauri-apps/cli": "^2.0.0"'
     Assert-MutationRejected "tauri.conf.json" ('"version":\s*"' + [regex]::Escape([string]$package.version) + '"') '"version": "9.9.9"'
     Assert-MutationRejected "tauri.conf.json" '"template":\s*"\./windows/installer\.nsi"' '"template": "./windows/other.nsi"'
