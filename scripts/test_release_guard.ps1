@@ -139,6 +139,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $fixture "docs\distribution\screenshots\01-control.png") -Destination (Join-Path $fixture "docs\distribution\screenshots\99-extra.png")
     if ((Invoke-Guard) -eq 0) { throw "Release guard accepted an unrecorded manual input" }
     Write-Host "release guard behavioral tests passed"
+    $global:LASTEXITCODE = 0
 } finally {
     if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
 }
