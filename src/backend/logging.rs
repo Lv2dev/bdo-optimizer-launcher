@@ -8,9 +8,11 @@
 
 use std::path::PathBuf;
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 
 const LOG_FILE_PREFIX: &str = "bdo-optimizer";
+const MAX_LOG_FILES: usize = 30;
 
 // %LOCALAPPDATA%\bdo-optimizer-launcher\logs\.
 // LOCALAPPDATA 부재 시 None — 로그 비활성(설치 폴더 오염 회피, settings.rs M24 패턴).
@@ -56,7 +58,7 @@ pub fn init() -> Option<WorkerGuard> {
         return None;
     }
 
-    let file_appender = tracing_appender::rolling::daily(&dir, LOG_FILE_PREFIX);
+    let file_appender = build_file_appender(&dir).ok()?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -85,6 +87,14 @@ pub fn init() -> Option<WorkerGuard> {
     Some(guard)
 }
 
+fn build_file_appender(dir: &std::path::Path) -> Result<RollingFileAppender, InitError> {
+    RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .max_log_files(MAX_LOG_FILES)
+        .build(dir)
+}
+
 // 패닉 발생 시 location + message를 ERROR로 로깅. 기존 hook도 호출(콘솔 출력 등 표준 동작 보존).
 fn register_panic_hook() {
     let prev = std::panic::take_hook();
@@ -102,4 +112,59 @@ fn register_panic_hook() {
         tracing::error!(location = %location, message = %payload, "panic");
         prev(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "bdo-optimizer-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn rolling_appender_keeps_at_most_thirty_matching_logs() {
+        let dir = unique_temp_path("retention");
+        std::fs::create_dir_all(&dir).unwrap();
+        for day in 1..=31 {
+            std::fs::write(
+                dir.join(format!("{LOG_FILE_PREFIX}.2026-01-{day:02}")),
+                b"old",
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.join("keep-me.txt"), b"unrelated").unwrap();
+
+        let appender = build_file_appender(&dir).unwrap();
+        drop(appender);
+
+        let matching = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(LOG_FILE_PREFIX)
+            })
+            .count();
+        assert!(matching <= MAX_LOG_FILES);
+        assert!(dir.join("keep-me.txt").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn appender_initialization_returns_error_instead_of_panicking() {
+        let file = unique_temp_path("not-a-directory");
+        std::fs::write(&file, b"file").unwrap();
+        assert!(build_file_appender(&file).is_err());
+        std::fs::remove_file(file).unwrap();
+    }
 }

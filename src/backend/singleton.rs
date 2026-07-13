@@ -96,17 +96,30 @@ pub fn acquire_or_focus_existing() -> bool {
 fn focus_existing_window() {
     unsafe {
         let title = wide_null(WINDOW_TITLE);
-        let hwnd = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())).unwrap_or_default();
-        if hwnd.0.is_null() {
-            // 기존 인스턴스가 트레이 + 창 destroy 상태일 수 있다. 사용자는 트레이 메뉴로 복원해야 한다.
-            return;
-        }
-        if !hwnd_matches_current_exe(hwnd) {
-            return;
-        }
-        // 최소화/숨김 상태면 복원 (visible이어도 부작용 없음).
-        let _ = ShowWindow(hwnd, SW_RESTORE);
-        let _ = SetForegroundWindow(hwnd);
+        focus_existing_window_with(
+            || {
+                let hwnd = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())).unwrap_or_default();
+                (!hwnd.0.is_null()).then_some(hwnd)
+            },
+            |hwnd| hwnd_matches_current_exe(*hwnd),
+            |hwnd| {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+                let _ = SetForegroundWindow(hwnd);
+            },
+        );
+    }
+}
+
+fn focus_existing_window_with<T>(
+    find: impl FnOnce() -> Option<T>,
+    owner_matches: impl FnOnce(&T) -> bool,
+    show: impl FnOnce(T),
+) {
+    let Some(window) = find() else {
+        return;
+    };
+    if owner_matches(&window) {
+        show(window);
     }
 }
 
@@ -126,12 +139,15 @@ mod tests {
     }
 
     #[test]
-    fn focus_path_verifies_owner_process_image_before_showing_window() {
-        let src = include_str!("singleton.rs");
-        assert!(src.contains("fn hwnd_matches_current_exe("));
-        assert!(src.contains("GetWindowThreadProcessId"));
-        assert!(src.contains("QueryFullProcessImageNameW"));
-        assert!(src.contains("PROCESS_QUERY_LIMITED_INFORMATION"));
-        assert!(src.contains("if !hwnd_matches_current_exe(hwnd)"));
+    fn focus_path_shows_only_a_window_owned_by_the_current_executable() {
+        let show_calls = std::cell::Cell::new(0);
+        focus_existing_window_with(|| Some(7), |_| false, |_| show_calls.set(1));
+        assert_eq!(show_calls.get(), 0);
+
+        focus_existing_window_with(|| None::<u32>, |_| true, |_| show_calls.set(1));
+        assert_eq!(show_calls.get(), 0);
+
+        focus_existing_window_with(|| Some(7), |window| *window == 7, |_| show_calls.set(1));
+        assert_eq!(show_calls.get(), 1);
     }
 }

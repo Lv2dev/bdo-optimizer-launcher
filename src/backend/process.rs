@@ -26,10 +26,18 @@ pub enum Error {
     ImageMismatch(u32),
     #[error("Priority 설정 실패: {0}")]
     SetPriority(windows::core::Error),
+    #[error("현재 Priority 조회 실패: {0}")]
+    GetPriority(windows::core::Error),
     #[error("Affinity 설정 실패: {0}")]
     SetAffinity(windows::core::Error),
+    #[error("Affinity 설정 실패: {source}; Priority 롤백도 실패: {rollback}")]
+    SetAffinityRollback {
+        source: windows::core::Error,
+        rollback: windows::core::Error,
+    },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuInfo {
     pub physical_cores: u32,
     pub logical_threads: u32,
@@ -47,14 +55,46 @@ pub struct ProcessModeSnapshot {
     pub affinity_mask: usize,
 }
 
+static CPU_INFO_CACHE: std::sync::OnceLock<CpuInfo> = std::sync::OnceLock::new();
+static CPU_INFO_DETECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn get_cpu_info() -> CpuInfo {
+    get_or_detect_cpu_info(&CPU_INFO_CACHE, &CPU_INFO_DETECT_LOCK, detect_cpu_info)
+}
+
+fn get_or_detect_cpu_info(
+    cache: &std::sync::OnceLock<CpuInfo>,
+    detection_lock: &std::sync::Mutex<()>,
+    detect: impl FnOnce() -> (CpuInfo, bool),
+) -> CpuInfo {
+    if let Some(info) = cache.get() {
+        return *info;
+    }
+    let _guard = detection_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(info) = cache.get() {
+        return *info;
+    }
+    let (info, cacheable) = detect();
+    if cacheable {
+        let _ = cache.set(info);
+    }
+    info
+}
+
+fn detect_cpu_info() -> (CpuInfo, bool) {
     let fallback_logical = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
 
     let ex = unsafe { enumerate_cores_ex() };
+    let cacheable = ex.is_some();
     let physical_cores = count_physical_cores();
-    build_cpu_info_from_detection(ex, fallback_logical, physical_cores)
+    (
+        build_cpu_info_from_detection(ex, fallback_logical, physical_cores),
+        cacheable,
+    )
 }
 
 fn build_cpu_info_from_detection(
@@ -120,6 +160,23 @@ fn count_physical_cores() -> Option<u32> {
 /// 반환: (p_core_mask, e_core_mask, physical_cores, logical_threads).
 /// EfficiencyClass 최댓값을 P-core로, 그 외를 E-core로 분류 (비-hybrid CPU는 모두 같은 class라 e_mask=0).
 /// 가변 길이 구조체이므로 byte 단위 offset + Size 필드로 순회.
+const _: () = assert!(
+    std::mem::align_of::<u64>() >= std::mem::align_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>()
+);
+
+fn aligned_core_buffer(byte_len: usize) -> Vec<u64> {
+    let words = byte_len.div_ceil(std::mem::size_of::<u64>());
+    vec![0; words]
+}
+
+fn next_core_entry_offset(offset: usize, entry_size: usize, total_len: usize) -> Option<usize> {
+    if entry_size < std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>() {
+        return None;
+    }
+    let next = offset.checked_add(entry_size)?;
+    (next <= total_len).then_some(next)
+}
+
 unsafe fn enumerate_cores_ex() -> Option<(usize, usize, u32, u32)> {
     let mut len: u32 = 0;
     // 첫 호출: ERROR_INSUFFICIENT_BUFFER 예상 (성공하지 않음 OK).
@@ -128,7 +185,7 @@ unsafe fn enumerate_cores_ex() -> Option<(usize, usize, u32, u32)> {
         return None;
     }
 
-    let mut buf: Vec<u8> = vec![0u8; len as usize];
+    let mut buf = aligned_core_buffer(len as usize);
     GetLogicalProcessorInformationEx(
         RelationProcessorCore,
         Some(buf.as_mut_ptr() as *mut SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX),
@@ -140,11 +197,10 @@ unsafe fn enumerate_cores_ex() -> Option<(usize, usize, u32, u32)> {
     let mut entries: Vec<(u8, u64)> = Vec::new();
     let mut offset = 0usize;
     while offset + std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>() <= len as usize {
-        let entry = &*(buf.as_ptr().add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX);
+        let entry = &*(buf.as_ptr().cast::<u8>().add(offset)
+            as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX);
         let entry_size = entry.Size as usize;
-        if entry_size == 0 || offset + entry_size > len as usize {
-            break;
-        }
+        let next_offset = next_core_entry_offset(offset, entry_size, len as usize)?;
         if entry.Relationship == RelationProcessorCore {
             let proc = &entry.Anonymous.Processor;
             if proc.GroupCount >= 1 {
@@ -153,7 +209,7 @@ unsafe fn enumerate_cores_ex() -> Option<(usize, usize, u32, u32)> {
                 entries.push((proc.EfficiencyClass, mask));
             }
         }
-        offset += entry_size;
+        offset = next_offset;
     }
 
     let (p_core_mask, e_core_mask, physical_cores, logical_threads) = classify_cores(&entries);
@@ -261,23 +317,66 @@ pub fn calc_low_power_affinity(info: &CpuInfo) -> usize {
 
 // PID 캐시: 동일 게임 프로세스라면 toolhelp 풀스캔을 생략한다.
 // 캐시된 PID는 OpenProcess + QueryFullProcessImageNameW로 검증한 뒤에만 재사용.
-static CACHED_PID: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+#[derive(Default)]
+struct ProcessLookupCache {
+    pid: Option<u32>,
+    last_negative_scan: Option<std::time::Instant>,
+}
+
+static PROCESS_LOOKUP_CACHE: std::sync::Mutex<ProcessLookupCache> =
+    std::sync::Mutex::new(ProcessLookupCache {
+        pid: None,
+        last_negative_scan: None,
+    });
+const NEGATIVE_SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub fn find_process_id(exe_name: &str) -> Option<u32> {
-    // 1) 캐시 검증: 살아있고 이미지명이 일치하면 그대로 반환.
-    //    poison된 mutex는 graceful fallback(풀스캔으로 진행).
-    let cached = CACHED_PID.lock().ok().and_then(|g| *g);
-    if let Some(pid) = cached {
-        if verify_pid_image(pid, exe_name) {
+    find_process_id_cached(exe_name, false)
+}
+
+pub fn find_process_id_fresh(exe_name: &str) -> Option<u32> {
+    find_process_id_cached(exe_name, true)
+}
+
+fn find_process_id_cached(exe_name: &str, fresh: bool) -> Option<u32> {
+    let now = std::time::Instant::now();
+    find_process_id_with(
+        &PROCESS_LOOKUP_CACHE,
+        exe_name,
+        fresh,
+        now,
+        verify_pid_image,
+        scan_for_pid,
+    )
+}
+
+fn find_process_id_with(
+    cache: &std::sync::Mutex<ProcessLookupCache>,
+    exe_name: &str,
+    fresh: bool,
+    now: std::time::Instant,
+    verify: impl Fn(u32, &str) -> bool,
+    scan: impl Fn(&str) -> Option<u32>,
+) -> Option<u32> {
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(pid) = cache.pid {
+        if verify(pid, exe_name) {
             return Some(pid);
         }
+        cache.pid = None;
     }
-
-    // 2) 풀스캔
-    let found = scan_for_pid(exe_name);
-    if let Ok(mut guard) = CACHED_PID.lock() {
-        *guard = found;
+    if !fresh
+        && cache
+            .last_negative_scan
+            .is_some_and(|last| now.saturating_duration_since(last) < NEGATIVE_SCAN_TTL)
+    {
+        return None;
     }
+    let found = scan(exe_name);
+    cache.pid = found;
+    cache.last_negative_scan = found.is_none().then_some(now);
     found
 }
 
@@ -392,6 +491,26 @@ pub(super) fn priority_class_to_mode(priority: u32) -> Option<super::schedule::O
 // (apply_optimization은 재진입하지 않고 다른 전역 lock도 잡지 않아 데드락 위험이 없다.)
 static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[derive(Debug, PartialEq)]
+enum ApplyPairError<E> {
+    Priority(E),
+    Affinity { source: E, rollback: Option<E> },
+}
+
+fn apply_priority_affinity<E>(
+    previous_priority: PROCESS_CREATION_FLAGS,
+    desired_priority: PROCESS_CREATION_FLAGS,
+    mut set_priority: impl FnMut(PROCESS_CREATION_FLAGS) -> Result<(), E>,
+    mut set_affinity: impl FnMut() -> Result<(), E>,
+) -> Result<(), ApplyPairError<E>> {
+    set_priority(desired_priority).map_err(ApplyPairError::Priority)?;
+    if let Err(source) = set_affinity() {
+        let rollback = set_priority(previous_priority).err();
+        return Err(ApplyPairError::Affinity { source, rollback });
+    }
+    Ok(())
+}
+
 pub fn apply_optimization(
     pid: u32,
     affinity: usize,
@@ -422,16 +541,31 @@ pub fn apply_optimization(
             return Err(Error::ImageMismatch(pid));
         }
 
-        if let Err(e) = SetPriorityClass(handle, priority) {
+        let previous_priority = GetPriorityClass(handle);
+        if previous_priority == 0 {
             let _ = CloseHandle(handle);
-            return Err(Error::SetPriority(e));
+            return Err(Error::GetPriority(windows::core::Error::from_win32()));
         }
-        if let Err(e) = SetProcessAffinityMask(handle, affinity) {
-            let _ = CloseHandle(handle);
-            return Err(Error::SetAffinity(e));
-        }
+
+        let result = apply_priority_affinity(
+            PROCESS_CREATION_FLAGS(previous_priority),
+            priority,
+            |class| SetPriorityClass(handle, class),
+            || SetProcessAffinityMask(handle, affinity),
+        );
         let _ = CloseHandle(handle);
-        Ok(())
+        match result {
+            Ok(()) => Ok(()),
+            Err(ApplyPairError::Priority(error)) => Err(Error::SetPriority(error)),
+            Err(ApplyPairError::Affinity {
+                source,
+                rollback: None,
+            }) => Err(Error::SetAffinity(source)),
+            Err(ApplyPairError::Affinity {
+                source,
+                rollback: Some(rollback),
+            }) => Err(Error::SetAffinityRollback { source, rollback }),
+        }
     }
 }
 
@@ -456,6 +590,71 @@ unsafe fn query_image_name(handle: windows::Win32::Foundation::HANDLE) -> Option
 mod tests {
     use super::super::schedule::OptimizeMode;
     use super::*;
+
+    #[test]
+    fn successful_cpu_detection_is_cached_but_fallback_is_retried() {
+        let cache = std::sync::OnceLock::new();
+        let lock = std::sync::Mutex::new(());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let detected = info(8, 16);
+        assert_eq!(
+            get_or_detect_cpu_info(&cache, &lock, || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (detected, true)
+            }),
+            detected
+        );
+        assert_eq!(get_or_detect_cpu_info(&cache, &lock, || panic!()), detected);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let fallback_cache = std::sync::OnceLock::new();
+        let fallback_lock = std::sync::Mutex::new(());
+        let mut fallback_calls = 0;
+        for _ in 0..2 {
+            let _ = get_or_detect_cpu_info(&fallback_cache, &fallback_lock, || {
+                fallback_calls += 1;
+                (detected, false)
+            });
+        }
+        assert_eq!(fallback_calls, 2);
+    }
+
+    #[test]
+    fn negative_process_scan_is_shared_but_fresh_lookup_bypasses_ttl() {
+        let cache = std::sync::Mutex::new(ProcessLookupCache::default());
+        let now = std::time::Instant::now();
+        let scans = std::cell::Cell::new(0);
+        let scan = |_: &str| {
+            scans.set(scans.get() + 1);
+            None
+        };
+        assert_eq!(
+            find_process_id_with(&cache, "game.exe", false, now, |_, _| false, scan),
+            None
+        );
+        assert_eq!(
+            find_process_id_with(&cache, "game.exe", false, now, |_, _| false, scan),
+            None
+        );
+        assert_eq!(scans.get(), 1);
+        assert_eq!(
+            find_process_id_with(&cache, "game.exe", true, now, |_, _| false, scan),
+            None
+        );
+        assert_eq!(scans.get(), 2);
+        assert_eq!(
+            find_process_id_with(
+                &cache,
+                "game.exe",
+                false,
+                now + NEGATIVE_SCAN_TTL,
+                |_, _| false,
+                scan,
+            ),
+            None
+        );
+        assert_eq!(scans.get(), 3);
+    }
 
     #[test]
     fn priority_class_to_mode_maps_known_values() {
@@ -754,5 +953,60 @@ mod tests {
         assert_eq!(e, 0xFFFF_0000);
         assert_eq!(phys, 24);
         assert_eq!(log, 32);
+    }
+
+    #[test]
+    fn logical_processor_buffer_meets_structure_alignment() {
+        let buffer = aligned_core_buffer(257);
+        assert_eq!(
+            0,
+            buffer.as_ptr() as usize
+                % std::mem::align_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>()
+        );
+        assert!(buffer.len() * std::mem::size_of::<u64>() >= 257);
+    }
+
+    #[test]
+    fn variable_entry_bounds_reject_zero_short_and_overflow_sizes() {
+        let header = std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
+        assert_eq!(None, next_core_entry_offset(0, 0, header * 2));
+        assert_eq!(None, next_core_entry_offset(0, header - 1, header * 2));
+        assert_eq!(None, next_core_entry_offset(header, header + 1, header * 2));
+        assert_eq!(Some(header), next_core_entry_offset(0, header, header * 2));
+    }
+
+    #[test]
+    fn affinity_failure_rolls_priority_back_to_previous_class() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(Vec::new());
+        let result = apply_priority_affinity(
+            NORMAL_PRIORITY_CLASS,
+            HIGH_PRIORITY_CLASS,
+            |priority| {
+                calls.borrow_mut().push(("priority", priority.0));
+                Ok::<(), &'static str>(())
+            },
+            || {
+                calls.borrow_mut().push(("affinity", 0));
+                Err::<(), &'static str>("affinity failed")
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ApplyPairError::Affinity {
+                source: "affinity failed",
+                rollback: None
+            })
+        ));
+        assert_eq!(
+            vec![
+                ("priority", HIGH_PRIORITY_CLASS.0),
+                ("affinity", 0),
+                ("priority", NORMAL_PRIORITY_CLASS.0)
+            ],
+            calls.into_inner()
+        );
     }
 }

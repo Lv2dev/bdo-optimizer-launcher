@@ -1,12 +1,27 @@
 use serde::Deserialize;
+use std::time::Duration;
 
 const DEFAULT_GITHUB_REPOSITORY: &str = "Lv2dev/bdo-optimizer-launcher";
+
+#[derive(Clone, Copy)]
+struct UpdateHttpTimeouts {
+    connect: Duration,
+    read: Duration,
+    total: Duration,
+}
+
+fn update_http_timeouts() -> UpdateHttpTimeouts {
+    UpdateHttpTimeouts {
+        connect: Duration::from_secs(5),
+        read: Duration::from_secs(10),
+        total: Duration::from_secs(15),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatestRelease {
     pub tag_name: String,
     pub html_url: String,
-    pub exe_asset_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +38,8 @@ pub enum Error {
     ChannelNotConfigured,
     #[error("업데이트 확인 실패: {0}")]
     Http(String),
+    #[error("업데이트 확인 시간이 초과되었습니다.")]
+    Timeout,
     #[error("업데이트 정보 해석 실패: {0}")]
     Json(#[from] serde_json::Error),
     #[error("업데이트 버전 형식을 해석할 수 없습니다: {0}")]
@@ -37,14 +54,6 @@ pub enum Error {
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
-    #[serde(default)]
-    assets: Vec<GitHubAsset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
 }
 
 pub fn release_api_url(
@@ -90,19 +99,9 @@ pub fn compare_release_versions(latest: &str, current: &str) -> Option<bool> {
 
 pub fn parse_latest_release_json(json: &str) -> Result<LatestRelease, Error> {
     let release: GitHubRelease = serde_json::from_str(json)?;
-    let exe_asset_url = release
-        .assets
-        .into_iter()
-        .find(|asset| {
-            asset
-                .name
-                .eq_ignore_ascii_case("bdo-optimizer-launcher.exe")
-        })
-        .map(|asset| asset.browser_download_url);
     Ok(LatestRelease {
         tag_name: release.tag_name,
         html_url: release.html_url,
-        exe_asset_url,
     })
 }
 
@@ -127,14 +126,47 @@ pub fn evaluate_release(
 }
 
 fn fetch_latest_release_json(url: &str) -> Result<String, Error> {
-    let response = ureq::get(url)
+    fetch_latest_release_json_with_timeouts(url, update_http_timeouts())
+}
+
+fn fetch_latest_release_json_with_timeouts(
+    url: &str,
+    timeouts: UpdateHttpTimeouts,
+) -> Result<String, Error> {
+    let agent = ureq::builder()
+        .timeout_connect(timeouts.connect)
+        .timeout_read(timeouts.read)
+        .timeout(timeouts.total)
+        .build();
+    let response = agent
+        .get(url)
         .set("User-Agent", "bdo-optimizer-launcher")
         .set("Accept", "application/vnd.github+json")
         .call()
-        .map_err(|e| Error::Http(e.to_string()))?;
-    response
-        .into_string()
-        .map_err(|e| Error::Http(e.to_string()))
+        .map_err(map_ureq_error)?;
+    response.into_string().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            Error::Timeout
+        } else {
+            Error::Http(error.to_string())
+        }
+    })
+}
+
+fn map_ureq_error(error: ureq::Error) -> Error {
+    if let ureq::Error::Transport(transport) = &error {
+        let mut source = std::error::Error::source(transport);
+        while let Some(current) = source {
+            if current
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut)
+            {
+                return Error::Timeout;
+            }
+            source = current.source();
+        }
+    }
+    Error::Http(error.to_string())
 }
 
 pub fn check_latest_release() -> Result<UpdateCheck, Error> {
@@ -223,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_release_json_extracts_tag_page_and_exe_asset() {
+    fn latest_release_json_extracts_tag_and_release_page() {
         let json = r#"{
             "tag_name": "v0.2.0",
             "html_url": "https://github.com/owner/repo/releases/tag/v0.2.0",
@@ -239,10 +271,6 @@ mod tests {
         assert_eq!(
             release.html_url,
             "https://github.com/owner/repo/releases/tag/v0.2.0"
-        );
-        assert_eq!(
-            release.exe_asset_url.as_deref(),
-            Some("https://example.invalid/app.exe")
         );
     }
 
@@ -269,5 +297,33 @@ mod tests {
         assert!(!is_allowed_release_url("file:///c:/windows/system32"));
         assert!(!is_allowed_release_url("https://"));
         assert!(!is_allowed_release_url(""));
+    }
+
+    #[test]
+    fn update_http_timeouts_are_finite_and_ordered() {
+        let timeouts = update_http_timeouts();
+        assert!(timeouts.connect > std::time::Duration::ZERO);
+        assert!(timeouts.read >= timeouts.connect);
+        assert!(timeouts.total >= timeouts.read);
+    }
+
+    #[test]
+    fn stalled_update_response_returns_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let result = fetch_latest_release_json_with_timeouts(
+            &format!("http://{address}/release"),
+            UpdateHttpTimeouts {
+                connect: Duration::from_millis(50),
+                read: Duration::from_millis(50),
+                total: Duration::from_millis(100),
+            },
+        );
+        assert!(matches!(result, Err(Error::Timeout)));
+        server.join().unwrap();
     }
 }

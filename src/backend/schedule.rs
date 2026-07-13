@@ -6,6 +6,18 @@ use std::sync::{Mutex, MutexGuard};
 // 호출처가 이 락 아래에서 수행해 동시 호출 시 갱신 유실을 막는다.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(thiserror::Error, Debug)]
+pub enum SaveError {
+    #[error("스케줄 저장 경로를 확인할 수 없습니다.")]
+    PathUnavailable,
+    #[error("스케줄 디렉터리 생성 실패: {0}")]
+    CreateDir(std::io::Error),
+    #[error("스케줄 직렬화 실패: {0}")]
+    Serialize(serde_json::Error),
+    #[error("스케줄 파일 저장 실패: {0}")]
+    Write(std::io::Error),
+}
+
 pub fn write_lock() -> MutexGuard<'static, ()> {
     WRITE_LOCK
         .lock()
@@ -71,7 +83,6 @@ impl ScheduleRule {
 fn config_path() -> Option<PathBuf> {
     let appdata = std::env::var("APPDATA").ok()?;
     let dir = PathBuf::from(appdata).join("bdo-optimizer-launcher");
-    std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("schedules.json"))
 }
 
@@ -114,23 +125,40 @@ fn backup_broken(path: &std::path::Path) {
     let _ = std::fs::rename(path, backup);
 }
 
-pub fn save_rules(rules: &[ScheduleRule]) {
-    if let Some(path) = config_path() {
-        if let Ok(json) = serde_json::to_string(rules) {
-            let _ = super::atomic_write(&path, json.as_bytes());
-        }
+fn save_rules_to_path(rules: &[ScheduleRule], path: &std::path::Path) -> Result<(), SaveError> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(SaveError::CreateDir)?;
     }
+    let json = serde_json::to_vec(rules).map_err(SaveError::Serialize)?;
+    super::atomic_write(path, &json).map_err(SaveError::Write)
 }
 
-pub fn next_id(rules: &[ScheduleRule]) -> u32 {
-    rules.iter().map(|r| r.id).max().unwrap_or(0) + 1
+pub fn save_rules(rules: &[ScheduleRule]) -> Result<(), SaveError> {
+    let path = config_path().ok_or(SaveError::PathUnavailable)?;
+    save_rules_to_path(rules, &path)
+}
+
+pub fn next_id(rules: &[ScheduleRule]) -> Result<u32, &'static str> {
+    rules
+        .iter()
+        .map(|rule| rule.id)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or("스케줄 규칙 ID 공간이 소진되었습니다.")
 }
 
 /// 현재 시각 기준 가장 높은 우선순위의 활성 규칙을 반환.
 /// 우선순위: 특정 날짜(3) > 평일/주말(2) > 매일(1), 동일 우선순위에서는 id가 클수록(최신) 우선.
 pub fn active_rule(rules: &[ScheduleRule]) -> Option<&ScheduleRule> {
-    use chrono::{Datelike, Duration, Local, Timelike};
-    let now = Local::now();
+    active_rule_at(rules, chrono::Local::now())
+}
+
+pub fn active_rule_at(
+    rules: &[ScheduleRule],
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<&ScheduleRule> {
+    use chrono::{Datelike, Duration, Timelike};
     let today = now.format("%Y-%m-%d").to_string();
     let time_now = format!("{:02}:{:02}", now.hour(), now.minute());
     let weekday = now.weekday().num_days_from_monday() as u8; // 0=월
@@ -230,6 +258,7 @@ pub fn validate_date(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn rule(id: u32, kind: ScheduleKind, start: &str, end: &str) -> ScheduleRule {
         ScheduleRule {
@@ -353,12 +382,77 @@ mod tests {
 
     #[test]
     fn next_id_increments_max() {
-        assert_eq!(next_id(&[]), 1);
+        assert_eq!(next_id(&[]), Ok(1));
         let rules = vec![
             rule(1, ScheduleKind::Daily, "09:00", "10:00"),
             rule(5, ScheduleKind::Daily, "09:00", "10:00"),
             rule(3, ScheduleKind::Daily, "09:00", "10:00"),
         ];
-        assert_eq!(next_id(&rules), 6);
+        assert_eq!(next_id(&rules), Ok(6));
+    }
+
+    #[test]
+    fn next_id_reports_exhausted_u32_space() {
+        let rules = vec![rule(u32::MAX, ScheduleKind::Daily, "09:00", "10:00")];
+
+        assert!(next_id(&rules).is_err());
+    }
+
+    #[test]
+    fn save_rules_reports_directory_creation_failure() {
+        let blocker = std::env::temp_dir().join(format!(
+            "bdo-optimizer-schedule-blocker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&blocker);
+        std::fs::write(&blocker, b"file blocks directory").unwrap();
+
+        let result = save_rules_to_path(&[], &blocker.join("schedules.json"));
+
+        std::fs::remove_file(&blocker).unwrap();
+        assert!(matches!(result, Err(SaveError::CreateDir(_))));
+    }
+
+    #[test]
+    fn active_rule_at_prefers_specific_date_then_newest_id() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 7, 11, 20, 0, 0)
+            .single()
+            .unwrap();
+        let mut daily_old = rule(1, ScheduleKind::Daily, "19:00", "22:00");
+        daily_old.mode = OptimizeMode::LowPower;
+        let mut daily_new = rule(2, ScheduleKind::Daily, "19:00", "22:00");
+        daily_new.mode = OptimizeMode::Normal;
+        let mut specific = rule(
+            3,
+            ScheduleKind::SpecificDate("2026-07-11".into()),
+            "19:00",
+            "22:00",
+        );
+        specific.mode = OptimizeMode::High;
+
+        assert_eq!(
+            Some(3),
+            active_rule_at(&[daily_old, daily_new, specific], now).map(|r| r.id)
+        );
+    }
+
+    #[test]
+    fn active_rule_at_uses_previous_day_kind_after_midnight() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 7, 11, 1, 0, 0)
+            .single()
+            .unwrap();
+        let friday = ScheduleRule {
+            id: 1,
+            name: "금요일 야간".into(),
+            kind: ScheduleKind::Weekday,
+            start_time: "22:00".into(),
+            end_time: "06:00".into(),
+            mode: OptimizeMode::LowPower,
+            active: true,
+        };
+
+        assert_eq!(Some(1), active_rule_at(&[friday], now).map(|r| r.id));
     }
 }
