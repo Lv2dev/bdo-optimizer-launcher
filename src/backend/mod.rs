@@ -87,15 +87,6 @@ pub fn system_command(name: &str) -> std::process::Command {
 // 아래 helper들은 권한 상승 표면이 큰 사용자 쓰기 가능 루트 deny-list를
 // autostart, launcher 등 backend 전반에서 공유하기 위한 공통 진입점이다.
 // USERPROFILE / APPDATA / LOCALAPPDATA / TEMP / TMP 환경변수 기준.
-pub fn high_risk_user_writable_roots() -> Vec<std::path::PathBuf> {
-    ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .collect()
-}
-
 // launcher 전용 좁은 deny-list. M77에서 USERPROFILE 하위 정품 설치(Documents/Games,
 // Downloads 등)는 허용하기로 결정했으므로 USERPROFILE 루트는 제외하고, 드로퍼가 흔히
 // 쓰는 staging 위치(APPDATA/LOCALAPPDATA/TEMP/TMP)만 elevated spawn에서 거부한다.

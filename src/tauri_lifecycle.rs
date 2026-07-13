@@ -37,6 +37,7 @@ enum TrayLifecycleCommand {
     Quit,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum AutoLowPowerAction {
     Noop,
@@ -51,10 +52,105 @@ struct LifecycleState {
     normal_item: TauriMenuItem,
     low_power_item: TauriMenuItem,
     quitting: AtomicBool,
-    previous_game_window_visible: Mutex<Option<bool>>,
-    // M96 P3: 직전 tick의 게임 프로세스 존재 여부. 신규 등장 시 default_mode 자동 적용.
-    previous_game_present: Mutex<Option<bool>>,
-    auto_restore_mode: Mutex<Option<schedule::OptimizeMode>>,
+    automation_state: Mutex<AutomationState>,
+}
+
+#[derive(Debug, Default)]
+struct AutomationState {
+    previous_present: Option<bool>,
+    previous_visible: Option<bool>,
+    auto_restore_mode: Option<schedule::OptimizeMode>,
+    active_schedule_id: Option<u32>,
+    schedule_restore_mode: Option<schedule::OptimizeMode>,
+}
+
+#[derive(Clone, Copy)]
+struct AutomationInput {
+    current_present: bool,
+    current_visible: Option<bool>,
+    current_mode: Option<schedule::OptimizeMode>,
+    auto_low_power: bool,
+    active_schedule: Option<(u32, schedule::OptimizeMode)>,
+    last_user_mode: Option<schedule::OptimizeMode>,
+    default_mode: Option<schedule::OptimizeMode>,
+}
+
+fn automation_mode_action(
+    state: &mut AutomationState,
+    input: AutomationInput,
+) -> Option<schedule::OptimizeMode> {
+    let newly_present = matches!(
+        (state.previous_present, input.current_present),
+        (None, true) | (Some(false), true)
+    );
+    state.previous_present = Some(input.current_present);
+
+    if !input.current_present {
+        state.previous_visible = None;
+        state.auto_restore_mode = None;
+        state.active_schedule_id = None;
+        state.schedule_restore_mode = None;
+        return None;
+    }
+
+    let previous_visible = state.previous_visible;
+    state.previous_visible = input.current_visible;
+
+    if input.current_visible == Some(false) {
+        if input.auto_low_power {
+            if previous_visible != Some(false)
+                && input.current_mode != Some(schedule::OptimizeMode::LowPower)
+            {
+                state.auto_restore_mode = input.current_mode;
+            }
+            if input.current_mode != Some(schedule::OptimizeMode::LowPower) {
+                return Some(schedule::OptimizeMode::LowPower);
+            }
+        } else if newly_present {
+            return input
+                .default_mode
+                .filter(|mode| Some(*mode) != input.current_mode);
+        }
+        return None;
+    }
+
+    if input.current_visible != Some(true) {
+        return None;
+    }
+
+    let desired = if let Some((rule_id, mode)) = input.active_schedule {
+        if state.active_schedule_id.is_none() {
+            state.schedule_restore_mode = input
+                .last_user_mode
+                .or(input.default_mode)
+                .or(state.auto_restore_mode)
+                .or(input.current_mode);
+        }
+        state.active_schedule_id = Some(rule_id);
+        Some(mode)
+    } else {
+        let schedule_exited = state.active_schedule_id.take().is_some();
+        if schedule_exited {
+            input
+                .last_user_mode
+                .or(input.default_mode)
+                .or(state.auto_restore_mode.take())
+                .or(state.schedule_restore_mode.take())
+        } else if previous_visible == Some(false) && input.auto_low_power {
+            input
+                .last_user_mode
+                .or(input.default_mode)
+                .or(state.auto_restore_mode.take())
+        } else if input.last_user_mode.is_some() {
+            input.last_user_mode
+        } else if newly_present {
+            input.default_mode
+        } else {
+            None
+        }
+    };
+
+    desired.filter(|mode| Some(*mode) != input.current_mode)
 }
 
 impl LifecycleState {
@@ -159,9 +255,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<LifecycleState> {
         normal_item,
         low_power_item,
         quitting: AtomicBool::new(false),
-        previous_game_window_visible: Mutex::new(None),
-        previous_game_present: Mutex::new(None),
-        auto_restore_mode: Mutex::new(None),
+        automation_state: Mutex::new(AutomationState::default()),
     })
 }
 
@@ -202,13 +296,38 @@ fn handle_tray_command(app: &AppHandle, command: TrayLifecycleCommand) {
             );
         }
         TrayLifecycleCommand::CancelShutdown => {
-            let message = match shutdown::cancel_once() {
-                Ok(()) => "단발 종료 예약이 취소되었습니다.".to_string(),
+            let message = match cancel_all_shutdowns(shutdown::cancel_once, shutdown::cancel_weekly)
+            {
+                Ok(message) => message,
                 Err(error) => format!("오류: {error}"),
             };
             tracing::info!(message, "tray cancel shutdown requested");
         }
         TrayLifecycleCommand::Quit => request_quit(app),
+    }
+}
+
+fn cancel_all_shutdowns<F, G>(cancel_once: F, cancel_weekly: G) -> Result<String, String>
+where
+    F: FnOnce() -> Result<(), shutdown::Error>,
+    G: FnOnce() -> Result<(), shutdown::Error>,
+{
+    let mut errors = Vec::new();
+    if let Err(error) = cancel_once() {
+        if !matches!(error, shutdown::Error::TaskNotFound) {
+            errors.push(format!("단발 예약: {error}"));
+        }
+    }
+    if let Err(error) = cancel_weekly() {
+        if !matches!(error, shutdown::Error::TaskNotFound) {
+            errors.push(format!("매주 예약: {error}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok("단발 및 매주 종료 예약이 취소되었습니다.".to_string())
+    } else {
+        Err(errors.join(" / "))
     }
 }
 
@@ -238,6 +357,7 @@ fn tray_command_from_menu_id(id: &str) -> Option<TrayLifecycleCommand> {
     }
 }
 
+#[cfg(test)]
 fn auto_low_power_transition(
     enabled: bool,
     previous_visible: Option<bool>,
@@ -257,6 +377,7 @@ fn auto_low_power_transition(
     }
 }
 
+#[cfg(test)]
 fn visible_mode_maintenance_action(
     current_visible: Option<bool>,
     desired_mode: Option<schedule::OptimizeMode>,
@@ -341,6 +462,9 @@ fn current_game_mode() -> Option<schedule::OptimizeMode> {
 }
 
 fn log_game_mode_diagnostics(game_state: Option<GameWindowState>) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
     let Some(game_state) = game_state else {
         return;
     };
@@ -371,25 +495,6 @@ fn log_game_mode_diagnostics(game_state: Option<GameWindowState>) {
     }
 }
 
-fn apply_visible_mode_maintenance(
-    app: &AppHandle,
-    current_visible: Option<bool>,
-    desired_mode: Option<schedule::OptimizeMode>,
-) {
-    if let Some(mode) =
-        visible_mode_maintenance_action(current_visible, desired_mode, current_game_mode())
-    {
-        let response = tauri_commands::apply_mode_for_lifecycle(mode, false);
-        sync_tray_mode(
-            app,
-            response
-                .control
-                .current_mode
-                .map(schedule::OptimizeMode::from),
-        );
-    }
-}
-
 fn start_auto_low_power_worker(app: AppHandle) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(5));
@@ -405,6 +510,7 @@ fn start_auto_low_power_worker(app: AppHandle) {
 }
 
 // M96 P3: default_mode 자동 적용 판정. 게임이 (없음|첫 tick)에서 감지로 전환될 때만 적용한다.
+#[cfg(test)]
 fn default_mode_action(
     default_mode: Option<schedule::OptimizeMode>,
     previous_present: Option<bool>,
@@ -417,28 +523,34 @@ fn default_mode_action(
     }
 }
 
-// 게임 신규 실행을 감지하면 default_mode를 적용한다.
-// 자동 적용이므로 last_user_mode는 갱신하지 않는다(persist=false).
-fn apply_default_mode_on_game_launch(
-    app: &AppHandle,
-    state: &LifecycleState,
-    default_mode: Option<schedule::OptimizeMode>,
-) {
-    let current_present = process::find_process_id("BlackDesert64.exe").is_some();
-    // read-modify-write를 단일 lock 스코프로 묶는다(이전 값 읽기와 새 값 저장 사이에 lock을
-    // 두 번 따로 잡으면 그 틈에 상태가 바뀌어 transition 판정이 어긋날 수 있다).
-    let previous_present = {
-        let mut guard = state
-            .previous_game_present
+fn run_auto_low_power_tick(app: &AppHandle) {
+    let Some(state) = app.try_state::<LifecycleState>() else {
+        return;
+    };
+    let response = tauri_commands::apply_mode_for_lifecycle_decision(|| {
+        let setting = settings::load_settings();
+        let game_state = query_game_window_state();
+        log_game_mode_diagnostics(game_state);
+        let current_mode = game_state.and_then(|game| process::query_current_mode(game.pid));
+        let rules = schedule::load_rules();
+        let active_schedule = schedule::active_rule(&rules).map(|rule| (rule.id, rule.mode));
+        let input = AutomationInput {
+            current_present: game_state.is_some(),
+            current_visible: game_state.map(|game| game.visible),
+            current_mode,
+            auto_low_power: setting.auto_tray_on_game_minimize,
+            active_schedule,
+            last_user_mode: setting.last_user_mode,
+            default_mode: setting.default_mode,
+        };
+        let mut automation = state
+            .automation_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = *guard;
-        *guard = Some(current_present);
-        previous
-    };
+        automation_mode_action(&mut automation, input)
+    });
 
-    if let Some(mode) = default_mode_action(default_mode, previous_present, current_present) {
-        let response = tauri_commands::apply_mode_for_lifecycle(mode, false);
+    if let Some(response) = response {
         sync_tray_mode(
             app,
             response
@@ -449,96 +561,11 @@ fn apply_default_mode_on_game_launch(
     }
 }
 
-fn run_auto_low_power_tick(app: &AppHandle) {
-    let Some(state) = app.try_state::<LifecycleState>() else {
-        return;
-    };
-    let setting = settings::load_settings();
-
-    // M96 P3: 게임 신규 등장 시 기본 모드 자동 적용(auto_tray_on_game_minimize 게이트와 독립).
-    apply_default_mode_on_game_launch(app, &state, setting.default_mode);
-
-    let game_state = query_game_window_state();
-    let current_visible = game_state.map(|state| state.visible);
-    log_game_mode_diagnostics(game_state);
-
-    // 자동 저전력 OFF면 hidden/visible 전환은 처리하지 않는다. visible 상태 유지 판단은 계속
-    // 수행하되, 다음 ON 전환에서 오탐 transition이 생기지 않도록 직전 visible 상태만 초기화한다.
-    if !setting.auto_tray_on_game_minimize {
-        *state
-            .previous_game_window_visible
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        apply_visible_mode_maintenance(app, current_visible, setting.last_user_mode);
-        return;
-    }
-    let previous_visible = *state
-        .previous_game_window_visible
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let restore_mode = *state
-        .auto_restore_mode
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let action = auto_low_power_transition(
-        setting.auto_tray_on_game_minimize,
-        previous_visible,
-        current_visible,
-        restore_mode,
-    );
-
-    *state
-        .previous_game_window_visible
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = current_visible;
-
-    match action {
-        AutoLowPowerAction::Noop => {
-            apply_visible_mode_maintenance(app, current_visible, setting.last_user_mode);
-        }
-        AutoLowPowerAction::ApplyLowPower => {
-            if let Some(game_state) = game_state {
-                if let Some(mode) = process::query_current_mode(game_state.pid) {
-                    if mode != schedule::OptimizeMode::LowPower {
-                        *state
-                            .auto_restore_mode
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(mode);
-                    }
-                }
-            }
-            let response =
-                tauri_commands::apply_mode_for_lifecycle(schedule::OptimizeMode::LowPower, false);
-            sync_tray_mode(
-                app,
-                response
-                    .control
-                    .current_mode
-                    .map(schedule::OptimizeMode::from),
-            );
-        }
-        AutoLowPowerAction::Restore(mode) => {
-            *state
-                .auto_restore_mode
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-            let mode = setting.last_user_mode.unwrap_or(mode);
-            let response = tauri_commands::apply_mode_for_lifecycle(mode, false);
-            sync_tray_mode(
-                app,
-                response
-                    .control
-                    .current_mode
-                    .map(schedule::OptimizeMode::from),
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::schedule::OptimizeMode;
+    use std::cell::Cell;
 
     #[test]
     fn close_to_tray_hides_window_unless_quitting() {
@@ -561,6 +588,62 @@ mod tests {
             Some(TrayLifecycleCommand::ApplyMode(OptimizeMode::LowPower))
         );
         assert_eq!(tray_command_from_menu_id("tray_unknown"), None);
+    }
+
+    #[test]
+    fn tray_cancel_handles_once_only_schedule() {
+        let once_calls = Cell::new(0);
+        let weekly_calls = Cell::new(0);
+
+        let result = cancel_all_shutdowns(
+            || {
+                once_calls.set(once_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                weekly_calls.set(weekly_calls.get() + 1);
+                Err(shutdown::Error::TaskNotFound)
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!((once_calls.get(), weekly_calls.get()), (1, 1));
+    }
+
+    #[test]
+    fn tray_cancel_handles_weekly_only_schedule() {
+        let once_calls = Cell::new(0);
+        let weekly_calls = Cell::new(0);
+
+        let result = cancel_all_shutdowns(
+            || {
+                once_calls.set(once_calls.get() + 1);
+                Err(shutdown::Error::TaskNotFound)
+            },
+            || {
+                weekly_calls.set(weekly_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!((once_calls.get(), weekly_calls.get()), (1, 1));
+    }
+
+    #[test]
+    fn tray_cancel_handles_both_schedules_and_aggregates_real_errors() {
+        let success = cancel_all_shutdowns(|| Ok(()), || Ok(()));
+        assert!(success.is_ok());
+
+        let failure = cancel_all_shutdowns(
+            || Err(shutdown::Error::DeleteFailed("once".to_string())),
+            || Err(shutdown::Error::DeleteFailed("weekly".to_string())),
+        )
+        .unwrap_err();
+        assert!(failure.contains("단발"));
+        assert!(failure.contains("매주"));
+        assert!(failure.contains("once"));
+        assert!(failure.contains("weekly"));
     }
 
     #[test]
@@ -651,5 +734,98 @@ mod tests {
         assert_eq!(default_mode_action(Some(High), None, false), None);
         // default_mode 없음(수동) → 적용 안 함
         assert_eq!(default_mode_action(None, Some(false), true), None);
+    }
+
+    fn automation_input(
+        visible: Option<bool>,
+        current_mode: Option<OptimizeMode>,
+    ) -> AutomationInput {
+        AutomationInput {
+            current_present: true,
+            current_visible: visible,
+            current_mode,
+            auto_low_power: true,
+            active_schedule: None,
+            last_user_mode: None,
+            default_mode: None,
+        }
+    }
+
+    #[test]
+    fn automation_priority_is_hidden_then_schedule_then_user_then_default() {
+        let mut state = AutomationState::default();
+        let mut input = automation_input(Some(true), Some(OptimizeMode::Normal));
+        input.active_schedule = Some((7, OptimizeMode::High));
+        input.last_user_mode = Some(OptimizeMode::Normal);
+        input.default_mode = Some(OptimizeMode::LowPower);
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::High)
+        );
+
+        input.current_visible = Some(false);
+        input.current_mode = Some(OptimizeMode::High);
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::LowPower)
+        );
+
+        input.current_visible = Some(true);
+        input.current_mode = Some(OptimizeMode::LowPower);
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::High)
+        );
+
+        input.active_schedule = None;
+        input.current_mode = Some(OptimizeMode::High);
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::Normal)
+        );
+    }
+
+    #[test]
+    fn automation_applies_default_only_when_game_first_appears() {
+        let mut state = AutomationState::default();
+        let mut input = automation_input(Some(true), Some(OptimizeMode::Normal));
+        input.default_mode = Some(OptimizeMode::High);
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::High)
+        );
+
+        input.current_mode = Some(OptimizeMode::Normal);
+        assert_eq!(automation_mode_action(&mut state, input), None);
+    }
+
+    #[test]
+    fn automation_first_hidden_tick_enters_low_power_and_restores_baseline() {
+        let mut state = AutomationState::default();
+        let mut input = automation_input(Some(false), Some(OptimizeMode::High));
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::LowPower)
+        );
+
+        input.current_visible = Some(true);
+        input.current_mode = Some(OptimizeMode::LowPower);
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::High)
+        );
+    }
+
+    #[test]
+    fn automation_first_hidden_tick_applies_default_when_auto_low_power_is_disabled() {
+        let mut state = AutomationState::default();
+        let mut input = automation_input(Some(false), Some(OptimizeMode::Normal));
+        input.auto_low_power = false;
+        input.default_mode = Some(OptimizeMode::High);
+
+        assert_eq!(
+            automation_mode_action(&mut state, input),
+            Some(OptimizeMode::High)
+        );
     }
 }

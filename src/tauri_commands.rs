@@ -4,16 +4,34 @@ use crate::backend::{
 };
 use chrono::{DateTime, Duration as ChronoDuration, Local};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 use windows::Win32::System::Threading::{
     HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
 };
 
 static REAPPLY_GENERATION: AtomicU64 = AtomicU64::new(0);
+static LAUNCH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static MODE_REQUEST_LOCK: Mutex<()> = Mutex::new(());
 static MONITOR_RUNTIME: OnceLock<Mutex<MonitorRuntime>> = OnceLock::new();
+
+struct LauncherClaim<'a>(&'a AtomicBool);
+
+impl<'a> LauncherClaim<'a> {
+    fn try_acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(flag))
+    }
+}
+
+impl Drop for LauncherClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,6 +149,8 @@ pub struct ScheduleRuleInputDto {
 pub struct ShutdownStateDto {
     pub once_text: String,
     pub once_active: bool,
+    pub once_date: Option<String>,
+    pub once_time: Option<String>,
     pub weekly_text: String,
     pub weekly_active: bool,
     pub weekly_days: Vec<WeekdayDto>,
@@ -296,6 +316,9 @@ pub struct MonitorStateDto {
 struct MonitorRuntime {
     monitor: monitor::Monitor,
     fps_pid: Option<u32>,
+    fps_starting: bool,
+    fps_generation: u64,
+    fps_retry: Option<(u32, Instant)>,
     fps_session: Option<fps::FpsSession>,
     system_info: system_info::SystemInfo,
 }
@@ -305,6 +328,9 @@ impl MonitorRuntime {
         Self {
             monitor: monitor::Monitor::new(),
             fps_pid: None,
+            fps_starting: false,
+            fps_generation: 0,
+            fps_retry: None,
             fps_session: None,
             system_info: system_info::fetch_system_info(),
         }
@@ -382,11 +408,11 @@ fn mode_params(
     }
 }
 
-fn persist_last_user_mode(mode: schedule::OptimizeMode) {
+fn persist_last_user_mode(mode: schedule::OptimizeMode) -> Result<(), settings::SaveError> {
     let _guard = settings::write_lock();
     let mut loaded = settings::load_settings();
     loaded.last_user_mode = Some(mode);
-    settings::save_settings(&loaded);
+    settings::save_settings(&loaded)
 }
 
 fn current_mode_if_running(game_running: bool) -> Option<ModeDto> {
@@ -633,6 +659,26 @@ fn monitor_runtime() -> &'static Mutex<MonitorRuntime> {
     MONITOR_RUNTIME.get_or_init(|| Mutex::new(MonitorRuntime::new()))
 }
 
+fn should_claim_fps_start(
+    tracked_pid: Option<u32>,
+    starting: bool,
+    has_session: bool,
+    retry_blocked: bool,
+    observed_pid: u32,
+) -> bool {
+    !retry_blocked && (tracked_pid != Some(observed_pid) || (!starting && !has_session))
+}
+
+fn fps_start_claim_is_current(
+    tracked_pid: Option<u32>,
+    starting: bool,
+    current_generation: u64,
+    claimed_pid: u32,
+    claimed_generation: u64,
+) -> bool {
+    tracked_pid == Some(claimed_pid) && starting && current_generation == claimed_generation
+}
+
 fn monitor_system_info(info: &system_info::SystemInfo) -> MonitorSystemInfoDto {
     let gpu_name = if info.gpu_names.is_empty() {
         "Unknown GPU".to_string()
@@ -682,16 +728,14 @@ fn monitor_fps_display(
 ) -> (Option<u32>, String) {
     let text = if !alive {
         "세션 미시작".to_string()
-    } else if current_fps > 0 {
-        format!("{current_fps} FPS")
     } else if present_events > 0 {
-        "측정 중...".to_string()
+        format!("{current_fps} FPS")
     } else if total_events > 0 {
-        format!("Present 미수신 ({total_events} ev)")
+        format!("게임 Present 미수신 ({total_events} ev)")
     } else {
         "ETW 이벤트 없음".to_string()
     };
-    let fps = alive.then_some(current_fps);
+    let fps = (alive && present_events > 0).then_some(current_fps);
     (fps, text)
 }
 
@@ -866,54 +910,110 @@ fn read_initial_monitor_state() -> MonitorStateDto {
 }
 
 fn read_monitor_snapshot() -> MonitorStateDto {
-    let runtime = monitor_runtime();
-    let mut runtime = runtime
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let observed_pid = process::find_process_id("BlackDesert64.exe");
+    let runtime_mutex = monitor_runtime();
+    let mut detached_session = None;
+    let mut start_claim = None;
 
-    let Some(pid) = process::find_process_id("BlackDesert64.exe") else {
-        runtime.monitor.rebind(None);
-        runtime.fps_pid = None;
-        runtime.fps_session = None;
-        return monitor_not_running_state(
-            &runtime.system_info,
-            runtime.monitor.total_ram_mb,
-            runtime.monitor.total_vram_mb,
-        );
+    let state = {
+        let mut runtime = runtime_mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(pid) = observed_pid {
+            let now = Instant::now();
+            let retry_blocked = runtime
+                .fps_retry
+                .is_some_and(|(retry_pid, retry_at)| retry_pid == pid && now < retry_at);
+            if should_claim_fps_start(
+                runtime.fps_pid,
+                runtime.fps_starting,
+                runtime.fps_session.is_some(),
+                retry_blocked,
+                pid,
+            ) {
+                detached_session = runtime.fps_session.take();
+                runtime.fps_pid = Some(pid);
+                runtime.fps_starting = true;
+                runtime.fps_generation = runtime.fps_generation.wrapping_add(1);
+                runtime.fps_retry = None;
+                start_claim = Some((pid, runtime.fps_generation, fps::claim_start()));
+            }
+
+            let total_ram_mb = runtime.monitor.total_ram_mb;
+            let total_vram_mb = runtime.monitor.total_vram_mb;
+            let sample = runtime.monitor.sample(pid);
+            let (current_fps, present_events, total_events, fps_alive) =
+                match runtime.fps_session.as_ref() {
+                    Some(session) => (
+                        session.current_fps(),
+                        session.present_events(),
+                        session.total_events(),
+                        true,
+                    ),
+                    None => (0, 0, 0, false),
+                };
+
+            monitor_state_from_sample(MonitorSampleSnapshot {
+                pid,
+                info: &runtime.system_info,
+                total_ram_mb,
+                total_vram_mb,
+                sample: &sample,
+                fps: MonitorFpsSnapshot {
+                    current_fps,
+                    present_events,
+                    total_events,
+                    alive: fps_alive,
+                },
+            })
+        } else {
+            if runtime.fps_pid.is_some() || runtime.fps_starting || runtime.fps_session.is_some() {
+                fps::invalidate_start_claims();
+            }
+            runtime.monitor.rebind(None);
+            detached_session = runtime.fps_session.take();
+            runtime.fps_pid = None;
+            runtime.fps_starting = false;
+            runtime.fps_generation = runtime.fps_generation.wrapping_add(1);
+            runtime.fps_retry = None;
+            monitor_not_running_state(
+                &runtime.system_info,
+                runtime.monitor.total_ram_mb,
+                runtime.monitor.total_vram_mb,
+            )
+        }
     };
 
-    if runtime.fps_pid != Some(pid) {
-        runtime.fps_session = fps::FpsSession::start().ok();
-        runtime.fps_pid = Some(pid);
+    drop(detached_session);
+    if let Some((pid, generation, owner_claim)) = start_claim {
+        let started = fps::FpsSession::start(pid, owner_claim).ok();
+        let mut stale_session = None;
+        {
+            let mut runtime = runtime_mutex
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if fps_start_claim_is_current(
+                runtime.fps_pid,
+                runtime.fps_starting,
+                runtime.fps_generation,
+                pid,
+                generation,
+            ) {
+                runtime.fps_starting = false;
+                if started.is_some() {
+                    runtime.fps_session = started;
+                    runtime.fps_retry = None;
+                } else {
+                    runtime.fps_pid = None;
+                    runtime.fps_retry = Some((pid, Instant::now() + StdDuration::from_secs(5)));
+                }
+            } else {
+                stale_session = started;
+            }
+        }
+        drop(stale_session);
     }
-
-    let total_ram_mb = runtime.monitor.total_ram_mb;
-    let total_vram_mb = runtime.monitor.total_vram_mb;
-    let sample = runtime.monitor.sample(pid);
-    let (current_fps, present_events, total_events, fps_alive) = match runtime.fps_session.as_ref()
-    {
-        Some(session) => (
-            session.current_fps(),
-            session.present_events(),
-            session.total_events(),
-            true,
-        ),
-        None => (0, 0, 0, false),
-    };
-
-    monitor_state_from_sample(MonitorSampleSnapshot {
-        pid,
-        info: &runtime.system_info,
-        total_ram_mb,
-        total_vram_mb,
-        sample: &sample,
-        fps: MonitorFpsSnapshot {
-            current_fps,
-            present_events,
-            total_events,
-            alive: fps_alive,
-        },
-    })
+    state
 }
 
 fn validate_setting_input(input: &SettingInputDto) -> Result<(), String> {
@@ -1077,43 +1177,6 @@ fn schedule_rule_from_input_for_test(
     schedule_rule_from_input(input, id)
 }
 
-fn shutdown_state(
-    once_text: String,
-    once_active: bool,
-    weekly_text: String,
-    weekly_active: bool,
-    weekly_days: Vec<WeekdayDto>,
-    weekly_time: Option<String>,
-) -> ShutdownStateDto {
-    ShutdownStateDto {
-        once_text,
-        once_active,
-        weekly_text,
-        weekly_active,
-        weekly_days,
-        weekly_time,
-    }
-}
-
-#[cfg(test)]
-fn shutdown_state_for_test(
-    once_text: String,
-    once_active: bool,
-    weekly_text: String,
-    weekly_active: bool,
-    weekly_days: Vec<WeekdayDto>,
-    weekly_time: Option<String>,
-) -> ShutdownStateDto {
-    shutdown_state(
-        once_text,
-        once_active,
-        weekly_text,
-        weekly_active,
-        weekly_days,
-        weekly_time,
-    )
-}
-
 fn fmt_absolute(dt: DateTime<Local>) -> String {
     dt.format("%Y-%m-%d %H:%M").to_string()
 }
@@ -1193,12 +1256,14 @@ fn shutdown_state_from_snapshot(
     snapshot: shutdown::ScheduleSnapshot,
     now: DateTime<Local>,
 ) -> ShutdownStateDto {
-    let (once_text, once_active) = match snapshot.once {
+    let (once_text, once_active, once_date, once_time) = match snapshot.once {
         Some(dt) => (
             format!("{} ({})", fmt_absolute(dt), fmt_remaining(dt, now)),
             true,
+            Some(dt.format("%Y-%m-%d").to_string()),
+            Some(dt.format("%H:%M").to_string()),
         ),
-        None => (String::new(), false),
+        None => (String::new(), false, None, None),
     };
     let (weekly_text, weekly_active, weekly_days, weekly_time) = match snapshot.weekly {
         Some(info) => {
@@ -1217,14 +1282,16 @@ fn shutdown_state_from_snapshot(
         }
         None => (String::new(), false, Vec::new(), None),
     };
-    shutdown_state(
+    ShutdownStateDto {
         once_text,
         once_active,
+        once_date,
+        once_time,
         weekly_text,
         weekly_active,
         weekly_days,
         weekly_time,
-    )
+    }
 }
 
 fn read_shutdown_state() -> ShutdownStateDto {
@@ -1253,12 +1320,32 @@ fn weekday_code(day: WeekdayDto) -> &'static str {
     }
 }
 
-fn schedule_reapply(mode: schedule::OptimizeMode) {
-    let generation = REAPPLY_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+fn begin_mode_generation(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn generation_is_current(counter: &AtomicU64, generation: u64) -> bool {
+    counter.load(Ordering::SeqCst) == generation
+}
+
+fn reapply_wait_ms(elapsed_ms: u64, target_ms: u64) -> u64 {
+    target_ms.saturating_sub(elapsed_ms)
+}
+
+fn schedule_reapply(mode: schedule::OptimizeMode, generation: u64) {
     thread::spawn(move || {
-        for ms in [500_u64, 1000, 2000, 5000, 10000] {
-            thread::sleep(StdDuration::from_millis(ms));
-            if REAPPLY_GENERATION.load(Ordering::SeqCst) != generation {
+        let started = Instant::now();
+        for target_ms in [500_u64, 1000, 2000, 5000, 10000] {
+            let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let wait_ms = reapply_wait_ms(elapsed_ms, target_ms);
+            if wait_ms > 0 {
+                thread::sleep(StdDuration::from_millis(wait_ms));
+            }
+
+            let _request_guard = MODE_REQUEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !generation_is_current(&REAPPLY_GENERATION, generation) {
                 return;
             }
             let Some(pid) = process::find_process_id("BlackDesert64.exe") else {
@@ -1293,21 +1380,34 @@ pub fn get_app_state(app: tauri::AppHandle) -> AppStateDto {
 }
 
 #[tauri::command]
-pub fn get_monitor_snapshot() -> MonitorStateDto {
-    read_monitor_snapshot()
+pub async fn get_monitor_snapshot() -> MonitorStateDto {
+    tauri::async_runtime::spawn_blocking(read_monitor_snapshot)
+        .await
+        .unwrap_or_else(|_| read_initial_monitor_state())
 }
 
 // 모니터 탭 이탈 시 프런트가 호출한다. ETW FPS 세션을 능동적으로 중단(Drop)해
 // 게임 실행 중에도 모니터를 보지 않을 때의 idle ETW 상주 비용을 없앤다.
 #[tauri::command]
-pub fn stop_monitor_session() {
+pub async fn stop_monitor_session() {
+    let _ = tauri::async_runtime::spawn_blocking(stop_monitor_session_blocking).await;
+}
+
+fn stop_monitor_session_blocking() {
     let runtime = monitor_runtime();
-    let mut runtime = runtime
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.fps_session = None;
-    runtime.fps_pid = None;
-    runtime.monitor.rebind(None);
+    let detached_session = {
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        fps::invalidate_start_claims();
+        runtime.fps_pid = None;
+        runtime.fps_starting = false;
+        runtime.fps_generation = runtime.fps_generation.wrapping_add(1);
+        runtime.fps_retry = None;
+        runtime.monitor.rebind(None);
+        runtime.fps_session.take()
+    };
+    drop(detached_session);
 }
 
 #[tauri::command]
@@ -1315,87 +1415,77 @@ pub fn get_settings() -> SettingsStateDto {
     read_settings_state()
 }
 
+fn update_settings(
+    mutation: impl FnOnce(&mut settings::AppSettings) -> String,
+) -> Result<String, String> {
+    let _guard = settings::write_lock();
+    let mut loaded = settings::load_settings();
+    let message = mutation(&mut loaded);
+    settings::save_settings(&loaded).map_err(|error| error.to_string())?;
+    Ok(message)
+}
+
 #[tauri::command]
-pub fn set_setting(input: SettingInputDto) -> SettingsCommandResponseDto {
+pub fn set_setting(input: SettingInputDto) -> Result<SettingsCommandResponseDto, String> {
     if let Err(message) = validate_setting_input(&input) {
-        return settings_command_response(message, read_settings_state());
+        return Ok(settings_command_response(message, read_settings_state()));
     }
 
-    // load→수정→save를 직렬화해 동시 호출 시 갱신 유실을 막는다.
-    let _guard = settings::write_lock();
     let message = match input.key {
-        SettingKeyDto::ThemeMode => {
-            let mut loaded = settings::load_settings();
+        SettingKeyDto::ThemeMode => update_settings(|loaded| {
             loaded.theme_mode = settings::ThemeMode::from(input.theme_mode.unwrap());
-            settings::save_settings(&loaded);
             "테마 설정을 저장했습니다.".to_string()
-        }
-        SettingKeyDto::AccentPalette => {
-            let mut loaded = settings::load_settings();
+        }),
+        SettingKeyDto::AccentPalette => update_settings(|loaded| {
             loaded.accent_palette = input.int_value.unwrap();
-            settings::save_settings(&loaded);
             "액센트 색상을 저장했습니다.".to_string()
-        }
-        SettingKeyDto::ReduceMotion => {
-            let mut loaded = settings::load_settings();
+        }),
+        SettingKeyDto::ReduceMotion => update_settings(|loaded| {
             loaded.reduce_motion = input.bool_value.unwrap();
-            settings::save_settings(&loaded);
             "접근성 설정을 저장했습니다.".to_string()
-        }
-        SettingKeyDto::AutoTrayOnGameMinimize => {
-            let mut loaded = settings::load_settings();
+        }),
+        SettingKeyDto::AutoTrayOnGameMinimize => update_settings(|loaded| {
             loaded.auto_tray_on_game_minimize = input.bool_value.unwrap();
-            settings::save_settings(&loaded);
             "런처 동작 설정을 저장했습니다.".to_string()
-        }
-        SettingKeyDto::CloseToTray => {
-            let mut loaded = settings::load_settings();
+        }),
+        SettingKeyDto::CloseToTray => update_settings(|loaded| {
             loaded.close_to_tray = input.bool_value.unwrap();
-            settings::save_settings(&loaded);
             "창 닫기 동작 설정을 저장했습니다.".to_string()
-        }
+        }),
         SettingKeyDto::LauncherPath => {
             let path = input.string_value.unwrap();
             if path.chars().count() > 512 {
-                "런처 경로가 너무 깁니다. 512자 이내로 입력하세요.".to_string()
+                Ok("런처 경로가 너무 깁니다. 512자 이내로 입력하세요.".to_string())
             } else {
-                let mut loaded = settings::load_settings();
-                loaded.launcher_path = path;
-                settings::save_settings(&loaded);
-                "런처 경로를 저장했습니다.".to_string()
+                update_settings(move |loaded| {
+                    loaded.launcher_path = path;
+                    "런처 경로를 저장했습니다.".to_string()
+                })
             }
         }
-        SettingKeyDto::DefaultMode => {
-            let mut loaded = settings::load_settings();
+        SettingKeyDto::DefaultMode => update_settings(|loaded| {
             loaded.default_mode = input.default_mode.map(schedule::OptimizeMode::from);
-            settings::save_settings(&loaded);
             match loaded.default_mode {
                 Some(_) => "기본 적용 모드를 저장했습니다.".to_string(),
                 None => "기본 적용 모드를 사용 안 함으로 설정했습니다.".to_string(),
             }
-        }
-        SettingKeyDto::MonitorInterval => {
-            let mut loaded = settings::load_settings();
+        }),
+        SettingKeyDto::MonitorInterval => update_settings(|loaded| {
             loaded.monitor_interval_ms = input.int_value.unwrap();
-            settings::save_settings(&loaded);
             "모니터 갱신 주기를 저장했습니다.".to_string()
-        }
-        SettingKeyDto::UpdateAlertEnabled => {
-            let mut loaded = settings::load_settings();
+        }),
+        SettingKeyDto::UpdateAlertEnabled => update_settings(|loaded| {
             loaded.update_alert_enabled = input.bool_value.unwrap();
-            settings::save_settings(&loaded);
             if loaded.update_alert_enabled {
                 "업데이트 알림을 켰습니다.".to_string()
             } else {
                 "업데이트 알림을 껐습니다.".to_string()
             }
-        }
-        SettingKeyDto::UpdateCheckInterval => {
-            let mut loaded = settings::load_settings();
+        }),
+        SettingKeyDto::UpdateCheckInterval => update_settings(|loaded| {
             loaded.update_check_interval_ms = input.int_value.unwrap();
-            settings::save_settings(&loaded);
             "업데이트 확인 주기를 저장했습니다.".to_string()
-        }
+        }),
         SettingKeyDto::AutostartEnabled => {
             let on = input.bool_value.unwrap();
             let result = if on {
@@ -1405,30 +1495,30 @@ pub fn set_setting(input: SettingInputDto) -> SettingsCommandResponseDto {
                 autostart::unregister_autostart()
             };
             match result {
-                Ok(()) if on => "자동 시작을 등록했습니다.".to_string(),
-                Ok(()) => "자동 시작을 해제했습니다.".to_string(),
+                Ok(()) if on => Ok("자동 시작을 등록했습니다.".to_string()),
+                Ok(()) => Ok("자동 시작을 해제했습니다.".to_string()),
                 Err(autostart::Error::TaskNotFound) if !on => {
-                    "자동 시작이 이미 해제되어 있습니다.".to_string()
+                    Ok("자동 시작이 이미 해제되어 있습니다.".to_string())
                 }
-                Err(error) => error.to_string(),
+                Err(error) => Err(error.to_string()),
             }
         }
         SettingKeyDto::AutostartMinimized => {
             let on = input.bool_value.unwrap();
             let (enabled, _) = autostart::query_autostart();
             if !enabled {
-                "자동 시작이 꺼져 있습니다.".to_string()
+                Ok("자동 시작이 꺼져 있습니다.".to_string())
             } else {
                 match autostart::register_autostart(on) {
-                    Ok(()) if on => "자동 시작을 트레이 시작으로 변경했습니다.".to_string(),
-                    Ok(()) => "자동 시작을 일반 창으로 변경했습니다.".to_string(),
-                    Err(error) => error.to_string(),
+                    Ok(()) if on => Ok("자동 시작을 트레이 시작으로 변경했습니다.".to_string()),
+                    Ok(()) => Ok("자동 시작을 일반 창으로 변경했습니다.".to_string()),
+                    Err(error) => Err(error.to_string()),
                 }
             }
         }
-    };
+    }?;
 
-    settings_command_response(message, read_settings_state())
+    Ok(settings_command_response(message, read_settings_state()))
 }
 
 #[tauri::command]
@@ -1475,14 +1565,14 @@ pub fn check_for_updates() -> UpdateCommandResponseDto {
 }
 
 #[tauri::command]
-pub fn check_update_alert() -> UpdateAlertCommandResponseDto {
+pub fn check_update_alert() -> Result<UpdateAlertCommandResponseDto, String> {
     if !settings::load_settings().update_alert_enabled {
-        return update_alert_command_response(
+        return Ok(update_alert_command_response(
             "업데이트 알림이 꺼져 있습니다.",
             initial_update_state(),
             false,
             String::new(),
-        );
+        ));
     }
 
     match update::check_latest_release() {
@@ -1498,7 +1588,7 @@ pub fn check_update_alert() -> UpdateAlertCommandResponseDto {
                     )
                 {
                     loaded.last_update_notified_version = Some(check.latest_version.clone());
-                    settings::save_settings(&loaded);
+                    settings::save_settings(&loaded).map_err(|error| error.to_string())?;
                     true
                 } else {
                     false
@@ -1512,14 +1602,14 @@ pub fn check_update_alert() -> UpdateAlertCommandResponseDto {
             } else {
                 String::new()
             };
-            update_alert_command_response(
+            Ok(update_alert_command_response(
                 state.status_text.clone(),
                 state,
                 should_alert,
                 alert_text,
-            )
+            ))
         }
-        Err(update::Error::ChannelNotConfigured) => update_alert_command_response(
+        Err(update::Error::ChannelNotConfigured) => Ok(update_alert_command_response(
             "업데이트 채널이 설정되지 않았습니다.",
             update_state(
                 "업데이트 채널 미설정.".to_string(),
@@ -1531,10 +1621,10 @@ pub fn check_update_alert() -> UpdateAlertCommandResponseDto {
             ),
             false,
             String::new(),
-        ),
+        )),
         Err(error) => {
             let message = error.to_string();
-            update_alert_command_response(
+            Ok(update_alert_command_response(
                 message.clone(),
                 update_state(
                     message,
@@ -1546,7 +1636,7 @@ pub fn check_update_alert() -> UpdateAlertCommandResponseDto {
                 ),
                 false,
                 String::new(),
-            )
+            ))
         }
     }
 }
@@ -1587,7 +1677,7 @@ pub fn refresh_game_status(app: tauri::AppHandle) -> CommandResponseDto {
 }
 
 #[tauri::command]
-pub fn launch_game(launcher_path: String) -> CommandResponseDto {
+pub async fn launch_game(launcher_path: String) -> CommandResponseDto {
     if launcher_path.chars().count() > 512 {
         return command_response(
             "런처 경로가 너무 깁니다. 512자 이내로 입력하세요.",
@@ -1595,28 +1685,131 @@ pub fn launch_game(launcher_path: String) -> CommandResponseDto {
         );
     }
 
-    let message = match launcher::launch_game(&launcher_path) {
-        launcher::LaunchResult::GameAlreadyRunning => {
+    let result = match run_claimed_blocking(&LAUNCH_IN_PROGRESS, move || {
+        launcher::launch_game(&launcher_path)
+    })
+    .await
+    {
+        Ok(Some(result)) => Ok(result),
+        Ok(None) => {
+            return command_response(
+                "런처 실행을 준비 중입니다. 잠시만 기다려 주세요.",
+                read_control_state(),
+            )
+        }
+        Err(error) => Err(error),
+    };
+    let message = match result {
+        Ok(launcher::LaunchResult::GameAlreadyRunning) => {
             "게임이 이미 실행 중입니다. 런처를 실행하지 않습니다.".to_string()
         }
-        launcher::LaunchResult::LauncherStarted(path) => format!("런처 실행됨: {}", path.display()),
-        launcher::LaunchResult::LauncherNotFound => {
+        Ok(launcher::LaunchResult::LauncherStarted(path)) => {
+            format!("런처 실행됨: {}", path.display())
+        }
+        Ok(launcher::LaunchResult::LauncherRejected(path, error)) => {
+            format!("런처 보안 검증 실패 ({}): {error}", path.display())
+        }
+        Ok(launcher::LaunchResult::LauncherNotFound) => {
             "런처를 찾을 수 없습니다. 경로를 직접 입력하세요.".to_string()
         }
+        Err(error) => format!("런처 실행 작업 실패: {error}"),
     };
 
     command_response(message, read_control_state())
 }
 
-fn apply_mode_impl(
+async fn run_claimed_blocking<T, F>(
+    flag: &'static AtomicBool,
+    operation: F,
+) -> Result<Option<T>, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    run_blocking(move || {
+        let _claim = LauncherClaim::try_acquire(flag)?;
+        Some(operation())
+    })
+    .await
+}
+
+async fn run_blocking<T, F>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PreparedModeRequest {
+    ApplyNow { generation: u64 },
+    DeferredBySchedule(schedule::OptimizeMode),
+}
+
+fn prepare_mode_request<E>(
+    requested: schedule::OptimizeMode,
+    persist_user_choice: bool,
+    active_schedule: Option<schedule::OptimizeMode>,
+    save: impl FnOnce(schedule::OptimizeMode) -> Result<(), E>,
+    begin_generation: impl FnOnce() -> u64,
+) -> Result<PreparedModeRequest, E> {
+    if persist_user_choice {
+        if let Some(active_mode) = active_schedule {
+            save(requested)?;
+            return Ok(PreparedModeRequest::DeferredBySchedule(active_mode));
+        }
+    }
+    Ok(PreparedModeRequest::ApplyNow {
+        generation: begin_generation(),
+    })
+}
+
+fn run_serialized_mode_decision<T, R>(
+    lock: &Mutex<()>,
+    decide: impl FnOnce() -> Option<T>,
+    apply: impl FnOnce(T) -> R,
+) -> Option<R> {
+    let _request_guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    decide().map(apply)
+}
+
+fn apply_mode_impl_locked(
     backend_mode: schedule::OptimizeMode,
     persist_user_choice: bool,
 ) -> CommandResponseDto {
+    let active_schedule = persist_user_choice
+        .then(|| schedule::active_rule(&schedule::load_rules()).map(|rule| rule.mode))
+        .flatten();
+    let prepared = prepare_mode_request(
+        backend_mode,
+        persist_user_choice,
+        active_schedule,
+        persist_last_user_mode,
+        || begin_mode_generation(&REAPPLY_GENERATION),
+    );
+    let generation = match prepared {
+        Ok(PreparedModeRequest::ApplyNow { generation }) => generation,
+        Ok(PreparedModeRequest::DeferredBySchedule(_)) => {
+            return command_response(
+                "수동 모드를 저장했습니다. 활성 스케줄이 끝날 때까지 스케줄 모드를 유지합니다.",
+                read_control_state(),
+            );
+        }
+        Err(error) => {
+            return command_response(
+                format!("수동 모드 저장에 실패했습니다: {error}"),
+                read_control_state(),
+            );
+        }
+    };
     let info = process::get_cpu_info();
     let mode = ModeDto::from(backend_mode);
     let (affinity, priority, success_text) = mode_params(backend_mode, &info);
 
-    let Some(pid) = process::find_process_id("BlackDesert64.exe") else {
+    let Some(pid) = process::find_process_id_fresh("BlackDesert64.exe") else {
         return command_response(
             "BlackDesert64.exe 프로세스를 찾을 수 없습니다.",
             read_control_state(),
@@ -1632,11 +1825,14 @@ fn apply_mode_impl(
                 hybrid = info.has_hybrid,
                 "mode applied from tauri command"
             );
-            if persist_user_choice {
-                persist_last_user_mode(backend_mode);
+            let persistence_error = persist_user_choice
+                .then(|| persist_last_user_mode(backend_mode).err())
+                .flatten();
+            schedule_reapply(backend_mode, generation);
+            match persistence_error {
+                Some(error) => format!("모드는 적용했지만 설정 저장에 실패했습니다: {error}"),
+                None => success_text.to_string(),
             }
-            schedule_reapply(backend_mode);
-            success_text.to_string()
         }
         Err(e) => {
             tracing::error!(pid, mode = mode_label(mode), error = %e, "tauri mode apply failed");
@@ -1647,11 +1843,29 @@ fn apply_mode_impl(
     command_response(message, read_control_state())
 }
 
+fn apply_mode_impl(
+    backend_mode: schedule::OptimizeMode,
+    persist_user_choice: bool,
+) -> CommandResponseDto {
+    let _request_guard = MODE_REQUEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    apply_mode_impl_locked(backend_mode, persist_user_choice)
+}
+
 pub(crate) fn apply_mode_for_lifecycle(
     mode: schedule::OptimizeMode,
     persist_user_choice: bool,
 ) -> CommandResponseDto {
     apply_mode_impl(mode, persist_user_choice)
+}
+
+pub(crate) fn apply_mode_for_lifecycle_decision(
+    decide: impl FnOnce() -> Option<schedule::OptimizeMode>,
+) -> Option<CommandResponseDto> {
+    run_serialized_mode_decision(&MODE_REQUEST_LOCK, decide, |mode| {
+        apply_mode_impl_locked(mode, false)
+    })
 }
 
 #[tauri::command]
@@ -1666,24 +1880,33 @@ pub fn list_schedule_rules() -> ScheduleStateDto {
     read_schedule_state()
 }
 
+fn next_schedule_id(rules: &[schedule::ScheduleRule]) -> Result<u32, String> {
+    schedule::next_id(rules).map_err(str::to_string)
+}
+
 #[tauri::command]
-pub fn add_schedule_rule(input: ScheduleRuleInputDto) -> ScheduleCommandResponseDto {
+pub fn add_schedule_rule(
+    input: ScheduleRuleInputDto,
+) -> Result<ScheduleCommandResponseDto, String> {
     let _guard = schedule::write_lock();
     let mut rules = schedule::load_rules();
-    let id = schedule::next_id(&rules);
+    let id = next_schedule_id(&rules)?;
     let message = match schedule_rule_from_input(input, id) {
         Ok(rule) => {
             rules.push(rule);
-            schedule::save_rules(&rules);
+            schedule::save_rules(&rules).map_err(|error| error.to_string())?;
             "스케줄 규칙이 추가되었습니다.".to_string()
         }
         Err(message) => message,
     };
-    schedule_command_response(message, schedule_state_from_rules(rules))
+    Ok(schedule_command_response(
+        message,
+        schedule_state_from_rules(rules),
+    ))
 }
 
 #[tauri::command]
-pub fn delete_schedule_rule(id: u32) -> ScheduleCommandResponseDto {
+pub fn delete_schedule_rule(id: u32) -> Result<ScheduleCommandResponseDto, String> {
     let _guard = schedule::write_lock();
     let mut rules = schedule::load_rules();
     let before = rules.len();
@@ -1691,25 +1914,31 @@ pub fn delete_schedule_rule(id: u32) -> ScheduleCommandResponseDto {
     let message = if rules.len() == before {
         "삭제할 스케줄 규칙을 찾을 수 없습니다.".to_string()
     } else {
-        schedule::save_rules(&rules);
+        schedule::save_rules(&rules).map_err(|error| error.to_string())?;
         "스케줄 규칙이 삭제되었습니다.".to_string()
     };
-    schedule_command_response(message, schedule_state_from_rules(rules))
+    Ok(schedule_command_response(
+        message,
+        schedule_state_from_rules(rules),
+    ))
 }
 
 #[tauri::command]
-pub fn toggle_schedule_rule(id: u32) -> ScheduleCommandResponseDto {
+pub fn toggle_schedule_rule(id: u32) -> Result<ScheduleCommandResponseDto, String> {
     let _guard = schedule::write_lock();
     let mut rules = schedule::load_rules();
     let message = match rules.iter_mut().find(|rule| rule.id == id) {
         Some(rule) => {
             rule.active = !rule.active;
-            schedule::save_rules(&rules);
+            schedule::save_rules(&rules).map_err(|error| error.to_string())?;
             "스케줄 규칙 상태가 변경되었습니다.".to_string()
         }
         None => "변경할 스케줄 규칙을 찾을 수 없습니다.".to_string(),
     };
-    schedule_command_response(message, schedule_state_from_rules(rules))
+    Ok(schedule_command_response(
+        message,
+        schedule_state_from_rules(rules),
+    ))
 }
 
 #[tauri::command]
@@ -2101,6 +2330,30 @@ mod tests {
     }
 
     #[test]
+    fn fps_session_start_is_claimed_once_per_observed_pid() {
+        assert!(should_claim_fps_start(None, false, false, false, 700));
+        assert!(should_claim_fps_start(Some(699), false, true, false, 700));
+        assert!(!should_claim_fps_start(Some(700), true, false, false, 700));
+        assert!(!should_claim_fps_start(Some(700), false, true, false, 700));
+        assert!(should_claim_fps_start(Some(700), false, false, false, 700));
+        assert!(!should_claim_fps_start(None, false, false, true, 700));
+        assert!(fps_start_claim_is_current(Some(700), true, 4, 700, 4));
+        assert!(!fps_start_claim_is_current(Some(700), true, 5, 700, 4));
+    }
+
+    #[test]
+    fn fps_display_distinguishes_foreign_events_and_expired_game_fps() {
+        assert_eq!(
+            monitor_fps_display(0, 0, 10, true),
+            (None, "게임 Present 미수신 (10 ev)".to_string())
+        );
+        assert_eq!(
+            monitor_fps_display(0, 3, 10, true),
+            (Some(0), "0 FPS".to_string())
+        );
+    }
+
+    #[test]
     fn monitor_sample_converts_percentages_and_core_affinity() {
         let sample = crate::backend::monitor::MonitorSample {
             cpu_pct: Some(31.5),
@@ -2262,14 +2515,16 @@ mod tests {
 
     #[test]
     fn shutdown_state_uses_camel_case_wire_shape() {
-        let state = shutdown_state_for_test(
-            "2026-06-03 23:30 (1시간 남음)".to_string(),
-            true,
-            "매주 월/수 05:00 (다음 2일 남음)".to_string(),
-            true,
-            vec![WeekdayDto::Mon, WeekdayDto::Wed],
-            Some("05:00".to_string()),
-        );
+        let state = ShutdownStateDto {
+            once_text: "2026-06-03 23:30 (1시간 남음)".to_string(),
+            once_active: true,
+            once_date: Some("2026-06-03".to_string()),
+            once_time: Some("23:30".to_string()),
+            weekly_text: "매주 월/수 05:00 (다음 2일 남음)".to_string(),
+            weekly_active: true,
+            weekly_days: vec![WeekdayDto::Mon, WeekdayDto::Wed],
+            weekly_time: Some("05:00".to_string()),
+        };
 
         let value = serde_json::to_value(state).unwrap();
 
@@ -2278,6 +2533,8 @@ mod tests {
             json!({
                 "onceText": "2026-06-03 23:30 (1시간 남음)",
                 "onceActive": true,
+                "onceDate": "2026-06-03",
+                "onceTime": "23:30",
                 "weeklyText": "매주 월/수 05:00 (다음 2일 남음)",
                 "weeklyActive": true,
                 "weeklyDays": ["MON", "WED"],
@@ -2314,6 +2571,28 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_state_from_once_snapshot_carries_form_values() {
+        let now = Local
+            .with_ymd_and_hms(2026, 7, 11, 10, 0, 0)
+            .single()
+            .unwrap();
+        let once = Local
+            .with_ymd_and_hms(2026, 7, 12, 23, 30, 0)
+            .single()
+            .unwrap();
+        let state = shutdown_state_from_snapshot(
+            shutdown::ScheduleSnapshot {
+                once: Some(once),
+                weekly: None,
+            },
+            now,
+        );
+
+        assert_eq!(state.once_date, Some("2026-07-12".to_string()));
+        assert_eq!(state.once_time, Some("23:30".to_string()));
+    }
+
+    #[test]
     fn weekly_shutdown_input_serializes_days_as_scheduler_tokens() {
         let input = ShutdownInputDto {
             kind: ShutdownKindDto::Weekly,
@@ -2333,5 +2612,224 @@ mod tests {
                 "days": ["MON", "SUN"]
             })
         );
+    }
+
+    #[test]
+    fn new_mode_request_invalidates_previous_generation_even_if_it_later_fails() {
+        let counter = AtomicU64::new(0);
+        let first = begin_mode_generation(&counter);
+        let failed_request = begin_mode_generation(&counter);
+
+        assert!(!generation_is_current(&counter, first));
+        assert!(generation_is_current(&counter, failed_request));
+    }
+
+    #[test]
+    fn reapply_waits_are_based_on_request_start_not_previous_sleep() {
+        assert_eq!(500, reapply_wait_ms(0, 500));
+        assert_eq!(500, reapply_wait_ms(500, 1000));
+        assert_eq!(1000, reapply_wait_ms(1000, 2000));
+        assert_eq!(3000, reapply_wait_ms(2000, 5000));
+        assert_eq!(5000, reapply_wait_ms(5000, 10000));
+        assert_eq!(0, reapply_wait_ms(11000, 10000));
+    }
+
+    #[test]
+    fn active_schedule_persists_manual_choice_without_immediate_os_apply() {
+        let save_calls = std::cell::Cell::new(0);
+        let generation_calls = std::cell::Cell::new(0);
+        let scheduled = prepare_mode_request::<()>(
+            schedule::OptimizeMode::Normal,
+            true,
+            Some(schedule::OptimizeMode::High),
+            |mode| {
+                assert_eq!(mode, schedule::OptimizeMode::Normal);
+                save_calls.set(save_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                generation_calls.set(generation_calls.get() + 1);
+                1
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            scheduled,
+            PreparedModeRequest::DeferredBySchedule(schedule::OptimizeMode::High)
+        );
+        assert_eq!(save_calls.get(), 1);
+        assert_eq!(generation_calls.get(), 0);
+
+        let inactive = prepare_mode_request::<()>(
+            schedule::OptimizeMode::LowPower,
+            true,
+            None,
+            |_| panic!("inactive schedule must persist only after a successful apply"),
+            || 9,
+        )
+        .unwrap();
+        assert_eq!(inactive, PreparedModeRequest::ApplyNow { generation: 9 });
+    }
+
+    #[test]
+    fn active_schedule_save_failure_does_not_start_a_generation() {
+        let generation_calls = std::cell::Cell::new(0);
+        let result = prepare_mode_request(
+            schedule::OptimizeMode::Normal,
+            true,
+            Some(schedule::OptimizeMode::High),
+            |_| Err("save failed"),
+            || {
+                generation_calls.set(generation_calls.get() + 1);
+                1
+            },
+        );
+
+        assert_eq!(result, Err("save failed"));
+        assert_eq!(generation_calls.get(), 0);
+    }
+
+    #[test]
+    fn lifecycle_mode_decision_and_apply_are_atomic_against_user_requests() {
+        let lock = std::sync::Arc::new(Mutex::new(()));
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (decision_started_tx, decision_started_rx) = std::sync::mpsc::channel();
+        let (release_decision_tx, release_decision_rx) = std::sync::mpsc::channel();
+
+        let lifecycle_lock = std::sync::Arc::clone(&lock);
+        let decision_lock = std::sync::Arc::clone(&lock);
+        let apply_lock = std::sync::Arc::clone(&lock);
+        let lifecycle_events = std::sync::Arc::clone(&events);
+        let lifecycle = std::thread::spawn(move || {
+            run_serialized_mode_decision(
+                &lifecycle_lock,
+                || {
+                    assert!(matches!(
+                        decision_lock.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    lifecycle_events
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push("lifecycle_decision");
+                    decision_started_tx.send(()).unwrap();
+                    release_decision_rx.recv().unwrap();
+                    Some(schedule::OptimizeMode::High)
+                },
+                |mode| {
+                    assert!(matches!(
+                        apply_lock.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    lifecycle_events
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push("lifecycle_apply");
+                    mode
+                },
+            )
+        });
+
+        decision_started_rx.recv().unwrap();
+        let user_lock = std::sync::Arc::clone(&lock);
+        let user_events = std::sync::Arc::clone(&events);
+        let (user_attempted_tx, user_attempted_rx) = std::sync::mpsc::channel();
+        let user = std::thread::spawn(move || {
+            user_attempted_tx.send(()).unwrap();
+            let _guard = user_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            user_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push("user_apply");
+        });
+
+        user_attempted_rx.recv().unwrap();
+        release_decision_tx.send(()).unwrap();
+        assert_eq!(
+            lifecycle.join().unwrap(),
+            Some(schedule::OptimizeMode::High)
+        );
+        user.join().unwrap();
+
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ["lifecycle_decision", "lifecycle_apply", "user_apply"]
+        );
+    }
+
+    #[test]
+    fn blocking_launcher_work_runs_off_the_command_thread() {
+        let command_thread = std::thread::current().id();
+        let worker_thread =
+            tauri::async_runtime::block_on(run_blocking(|| std::thread::current().id())).unwrap();
+
+        assert_ne!(command_thread, worker_thread);
+    }
+
+    #[test]
+    fn blocking_launcher_panic_is_returned_as_an_error() {
+        let result = tauri::async_runtime::block_on(run_blocking(|| -> () {
+            panic!("injected launcher panic")
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn launcher_single_flight_claim_releases_on_drop() {
+        let flag = AtomicBool::new(false);
+        let first = LauncherClaim::try_acquire(&flag).unwrap();
+        assert!(LauncherClaim::try_acquire(&flag).is_none());
+        drop(first);
+        assert!(LauncherClaim::try_acquire(&flag).is_some());
+    }
+
+    #[test]
+    fn add_schedule_id_overflow_is_returned_as_a_command_error() {
+        let rules = vec![schedule::ScheduleRule {
+            id: u32::MAX,
+            name: "last".to_string(),
+            kind: schedule::ScheduleKind::Daily,
+            start_time: "09:00".to_string(),
+            end_time: "10:00".to_string(),
+            mode: schedule::OptimizeMode::Normal,
+            active: true,
+        }];
+
+        assert_eq!(
+            next_schedule_id(&rules),
+            Err("스케줄 규칙 ID 공간이 소진되었습니다.".to_string())
+        );
+    }
+
+    #[test]
+    fn cancelled_launcher_future_keeps_claim_until_blocking_work_finishes() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        FLAG.store(false, Ordering::Release);
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let task = tauri::async_runtime::spawn(run_claimed_blocking(&FLAG, move || {
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+        }));
+
+        started_rx
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("blocking launcher work did not start");
+        task.abort();
+        let _ = tauri::async_runtime::block_on(task);
+        assert!(FLAG.load(Ordering::Acquire));
+
+        finish_tx.send(()).unwrap();
+        let deadline = Instant::now() + StdDuration::from_secs(2);
+        while FLAG.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(!FLAG.load(Ordering::Acquire));
     }
 }

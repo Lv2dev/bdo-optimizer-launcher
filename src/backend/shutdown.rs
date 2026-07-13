@@ -1,4 +1,7 @@
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Weekday};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::SYSTEMTIME;
+use windows::Win32::Globalization::{GetDateFormatEx, DATE_SHORTDATE};
 
 const TASK_ONCE: &str = "BDO_Auto_Shutdown_Once";
 const TASK_WEEKLY: &str = "BDO_Auto_Shutdown_Weekly";
@@ -17,8 +20,12 @@ pub enum Error {
     RegisterWeeklyFailed,
     #[error("이미 등록된 예약이 없습니다.")]
     TaskNotFound,
+    #[error("예약 작업 조회 실패. Task Scheduler 상태와 관리자 권한을 확인하세요. ({0})")]
+    TaskQueryFailed(String),
     #[error("예약 취소 실패. 관리자 권한을 확인하세요. ({0})")]
     DeleteFailed(String),
+    #[error("Windows 지역 설정에 맞는 예약 날짜 변환 실패: {0}")]
+    DateFormat(windows::core::Error),
 }
 
 pub struct ScheduleSnapshot {
@@ -48,17 +55,31 @@ pub fn register_once_shutdown(date: &str, time: &str) -> Result<(), Error> {
     validate_date(date)?;
     validate_time(time)?;
 
+    let schedule_date = format_schtasks_date(date)?;
     let action = shutdown_action();
     let ok = schtasks_cmd()
         .args([
-            "/create", "/tn", TASK_ONCE, "/tr", &action, "/sc", "once", "/sd", date, "/st", time,
+            "/create",
+            "/tn",
+            TASK_ONCE,
+            "/tr",
+            &action,
+            "/sc",
+            "once",
+            "/sd",
+            &schedule_date,
+            "/st",
+            time,
             "/f",
         ])
         .output()?
         .status
         .success();
 
-    if ok && task_exists(TASK_ONCE) {
+    if !ok {
+        return Err(Error::RegisterOnceFailed);
+    }
+    if task_exists(TASK_ONCE)? {
         Ok(())
     } else {
         Err(Error::RegisterOnceFailed)
@@ -92,19 +113,63 @@ pub fn register_weekly_shutdown(days: &[&str], time: &str) -> Result<(), Error> 
         .status
         .success();
 
-    if ok && task_exists(TASK_WEEKLY) {
+    if !ok {
+        return Err(Error::RegisterWeeklyFailed);
+    }
+    if task_exists(TASK_WEEKLY)? {
         Ok(())
     } else {
         Err(Error::RegisterWeeklyFailed)
     }
 }
 
-fn task_exists(name: &str) -> bool {
-    schtasks_cmd()
-        .args(["/query", "/tn", name])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+fn task_file_path(name: &str) -> std::path::PathBuf {
+    super::system32_path("Tasks").join(name)
+}
+
+fn task_presence_from_query(
+    query_succeeded: bool,
+    task_file_exists: Result<bool, String>,
+    detail: String,
+) -> Result<bool, Error> {
+    if query_succeeded {
+        return Ok(true);
+    }
+    match task_file_exists {
+        Ok(false) => Ok(false),
+        Ok(true) => Err(Error::TaskQueryFailed(detail)),
+        Err(file_error) => Err(Error::TaskQueryFailed(format!(
+            "{detail}; 작업 파일 확인 실패: {file_error}"
+        ))),
+    }
+}
+
+fn task_exists(name: &str) -> Result<bool, Error> {
+    let out = schtasks_cmd().args(["/query", "/tn", name]).output()?;
+    let detail = {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let detail = format!("{}{}", stdout.trim(), stderr.trim());
+        if detail.is_empty() {
+            "schtasks /query가 비정상 종료했습니다.".to_string()
+        } else {
+            detail
+        }
+    };
+    let task_file_exists = task_file_path(name)
+        .try_exists()
+        .map_err(|error| error.to_string());
+    task_presence_from_query(out.status.success(), task_file_exists, detail)
+}
+
+fn delete_with_precheck(
+    exists: impl FnOnce() -> Result<bool, Error>,
+    delete: impl FnOnce() -> Result<(), Error>,
+) -> Result<(), Error> {
+    if !exists()? {
+        return Err(Error::TaskNotFound);
+    }
+    delete()
 }
 
 /// 단일 작업 XML 출력. 작업 미존재 또는 schtasks 자체 실패 시 빈 문자열.
@@ -152,10 +217,13 @@ pub fn query_schedules() -> ScheduleSnapshot {
 }
 
 fn delete_task(task_name: &str) -> Result<(), Error> {
-    if !task_exists(task_name) {
-        return Err(Error::TaskNotFound);
-    }
+    delete_with_precheck(
+        || task_exists(task_name),
+        || delete_existing_task(task_name),
+    )
+}
 
+fn delete_existing_task(task_name: &str) -> Result<(), Error> {
     let out = schtasks_cmd()
         .args(["/delete", "/tn", task_name, "/f"])
         .output()?;
@@ -319,6 +387,34 @@ fn validate_time(time: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn format_schtasks_date(date: &str) -> Result<String, Error> {
+    validate_date(date)?;
+    let parsed = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|_| Error::InvalidInput("날짜 형식 오류.".into()))?;
+    let system_time = SYSTEMTIME {
+        wYear: parsed.year() as u16,
+        wMonth: parsed.month() as u16,
+        wDay: parsed.day() as u16,
+        ..SYSTEMTIME::default()
+    };
+    let mut output = [0u16; 128];
+    let written = unsafe {
+        GetDateFormatEx(
+            PCWSTR::null(),
+            DATE_SHORTDATE,
+            Some(&system_time),
+            PCWSTR::null(),
+            Some(&mut output),
+            PCWSTR::null(),
+        )
+    };
+    if written == 0 {
+        return Err(Error::DateFormat(windows::core::Error::from_win32()));
+    }
+    let text_len = (written as usize).saturating_sub(1);
+    Ok(String::from_utf16_lossy(&output[..text_len]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,10 +507,78 @@ mod tests {
     }
 
     #[test]
-    fn delete_task_uses_query_precheck_before_delete() {
-        let src = include_str!("shutdown.rs");
-        assert!(src.contains("fn task_exists("));
-        assert!(src.contains(r#".args(["/query", "/tn", name])"#));
-        assert!(src.contains("if !task_exists(task_name)"));
+    fn delete_task_precheck_skips_delete_when_task_is_missing() {
+        let delete_calls = std::cell::Cell::new(0);
+        let missing = delete_with_precheck(
+            || Ok(false),
+            || {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(missing, Err(Error::TaskNotFound)));
+        assert_eq!(delete_calls.get(), 0);
+
+        let existing = delete_with_precheck(
+            || Ok(true),
+            || {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(existing.is_ok());
+        assert_eq!(delete_calls.get(), 1);
+    }
+
+    #[test]
+    fn delete_task_precheck_propagates_query_failure_without_deleting() {
+        let delete_calls = std::cell::Cell::new(0);
+        let result = delete_with_precheck(
+            || {
+                Err(Error::TaskQueryFailed(
+                    "Task Scheduler service unavailable".into(),
+                ))
+            },
+            || {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(Error::TaskQueryFailed(_))));
+        assert_eq!(delete_calls.get(), 0);
+    }
+
+    #[test]
+    fn failed_query_requires_task_file_absence_to_confirm_missing_task() {
+        assert!(matches!(
+            task_presence_from_query(false, Ok(false), "query failed".into()),
+            Ok(false)
+        ));
+        assert!(matches!(
+            task_presence_from_query(false, Ok(true), "query failed".into()),
+            Err(Error::TaskQueryFailed(_))
+        ));
+        assert!(matches!(
+            task_presence_from_query(
+                false,
+                Err("task file metadata denied".into()),
+                "query failed".into()
+            ),
+            Err(Error::TaskQueryFailed(_))
+        ));
+        assert!(matches!(
+            task_presence_from_query(true, Err("unused".into()), String::new()),
+            Ok(true)
+        ));
+    }
+
+    #[test]
+    fn schtasks_date_is_rendered_with_the_current_windows_short_date_contract() {
+        let formatted = format_schtasks_date("2026-07-11").unwrap();
+
+        assert!(!formatted.is_empty());
+        assert!(!formatted.contains('\0'));
+        assert_ne!(formatted, "2026-07-11T00:00:00");
     }
 }

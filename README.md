@@ -2,7 +2,7 @@
 
 검은사막(BlackDesert64.exe) 실행 + 성능 최적화 + 자동화를 위한 Windows 데스크톱 앱입니다.
 
-기존 Windows 배치 스크립트 기반 런처를 **Rust + Tauri/React UI**로 재구현한 단일 실행 파일(.exe)이며, 시스템 트레이 상주 + 시간표 자동 모드 전환 + PC 예약 종료 + 실시간 자원 모니터링을 한 화면에서 관리합니다.
+기존 Windows 배치 스크립트 기반 런처를 **Rust + Tauri/React UI**로 재구현한 설치형 앱이며, 시스템 트레이 상주 + 시간표 자동 모드 전환 + PC 예약 종료 + 실시간 자원 모니터링을 한 화면에서 관리합니다.
 
 ---
 
@@ -18,10 +18,10 @@
 ## 설치 및 실행
 
 ### 1. 다운로드
-저장소의 **Releases** 페이지에서 최신 `bdo-optimizer-launcher.exe`와 `SHA256SUMS.txt`를 같은 폴더에 다운로드합니다.
+저장소의 **Releases** 페이지에서 최신 `bdo-optimizer-launcher-setup.exe`와 `SHA256SUMS.txt`를 같은 폴더에 다운로드합니다. raw portable exe는 공식 배포하지 않습니다.
 
 ### 2. SmartScreen 우회 (코드사이닝 미적용)
-배포된 .exe는 코드사이닝 인증서가 적용되지 않아 첫 실행 시 Windows Defender SmartScreen 경고가 표시됩니다.
+배포된 설치 프로그램은 코드사이닝 인증서가 적용되지 않아 첫 실행 시 Windows Defender SmartScreen 경고가 표시됩니다.
 
 1. 첫 실행 시 "Windows에서 PC를 보호했습니다" 화면 표시
 2. **"추가 정보"** 클릭
@@ -32,16 +32,16 @@
 PowerShell에서 다운로드 폴더로 이동한 뒤:
 
 ```powershell
-Get-FileHash .\bdo-optimizer-launcher.exe -Algorithm SHA256
+Get-FileHash .\bdo-optimizer-launcher-setup.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
 두 출력의 해시 값이 같으면 배포 파일이 변조되지 않은 상태입니다.
 
-### 3. UAC 승인
-앱은 관리자 권한이 필요합니다. 첫 실행 시 UAC 프롬프트가 표시되면 **"예"** 선택. 자동 시작을 등록하면(설정 탭) UAC 프롬프트 없이 로그온 시 자동 실행됩니다.
+### 3. 설치와 UAC 승인
+설치 프로그램을 실행해 Program Files 아래 `BDO Optimizer` 폴더에 설치합니다. 설치 및 앱 실행 시 UAC 프롬프트가 표시되면 **"예"**를 선택하세요. 자동 시작을 등록하면(설정 탭) 이후 로그온 시 별도 UAC 프롬프트 없이 보호된 설치본이 실행됩니다.
 
-자동 시작은 관리자 권한 작업으로 등록되므로, `.exe`는 `Program Files`처럼 일반 사용자가 임의로 덮어쓰기 어려운 위치에 두는 것을 권장합니다. 사용자 프로필, AppData, 임시 폴더 아래에서 실행 중인 경우 자동 시작 등록이 거부됩니다.
+자동 시작은 설치된 현재 exe와 Program Files 부모 경로의 DACL을 다시 검사한 뒤에만 등록됩니다. 제거 프로그램은 자동 시작과 예약 종료 작업을 함께 정리합니다.
 
 ---
 
@@ -56,7 +56,7 @@ Get-Content .\SHA256SUMS.txt
 | **자동 트레이/복원** | 게임이 트레이로 내려가면 자동 저전력 모드 + 다시 나타나면 직전 모드 복원 |
 | **단일 인스턴스** | Named Mutex로 중복 실행 차단, 두 번째 실행은 기존 창 포그라운드 |
 | **자동 시작** | 작업 스케줄러 로그온 트리거(UAC 프롬프트 없이 승격). 사용자 쓰기 가능성이 높은 위치의 .exe는 등록 거부. 트레이 시작 옵션 가능 |
-| **업데이트 알림** | 설정 탭에서 GitHub Release 최신 버전을 확인하고, 새 버전이 있으면 릴리스 페이지를 엽니다. 실행 파일 자동 교체는 하지 않습니다 |
+| **업데이트 알림** | 새 버전의 릴리스 페이지를 엽니다. 새 setup을 내려받고 트레이에서 앱을 종료한 뒤 덮어 설치합니다. 실행 파일 자동 교체는 하지 않습니다 |
 | **자원 모니터링** | 검은사막 프로세스의 CPU/메모리/GPU/VRAM/Disk I/O/FPS 실시간 + 코어별 사용률 (갱신 주기 0.5/1/2초 선택) |
 | **테마** | 라이트/다크/Windows 자동 (OS 설정 추종) |
 | **접근성** | Tab 키 순회, Ctrl+1~4 탭 단축키, ESC 캘린더 dismiss, 주요 커스텀 컨트롤의 키보드 활성화 |
@@ -86,7 +86,16 @@ AMD CPU 및 구형 Intel CPU(11세대 이하)는 기존 로직(짝수 비트/전
 ### 자동 시작이 동작하지 않음
 설정 탭 → "Windows 시작 시 자동 실행"을 한 번 OFF → ON 토글하여 작업 스케줄러에 재등록. `schtasks /query /tn BDO_Optimizer_Launcher_Autostart`로 작업 등록 여부 확인.
 
-사용자 폴더, AppData, 임시 폴더 아래에서 실행 중이면 보안상 자동 시작 등록이 거부됩니다. `.exe`를 `C:\Program Files\BDO Optimizer\` 같은 관리자 전용 위치로 옮긴 뒤 다시 등록하세요.
+자동 시작은 공식 설치 프로그램으로 Program Files에 설치된 보호 실행 파일에서만 등록됩니다. portable 복사본에서는 등록되지 않으므로 설치 프로그램으로 다시 설치한 뒤 토글하세요.
+
+### 새 버전으로 업데이트하기
+설정 탭에서 릴리스 페이지를 연 뒤 새 `bdo-optimizer-launcher-setup.exe`를 내려받습니다. 트레이 메뉴에서 앱을 완전히 종료하고 설치 프로그램을 다시 실행하면 기존 설정을 유지한 채 덮어 설치됩니다. 자동 시작과 예약 종료 작업도 업그레이드 중에는 유지됩니다.
+
+### 앱 제거하기
+Windows 설정 → 앱 → 설치된 앱 → **BDO Optimizer** → 제거를 사용합니다. 제거 프로그램은 앱 파일과 자동 시작·단발·매주 예약 작업을 정리합니다. 사용자 설정 `%APPDATA%\bdo-optimizer-launcher`와 로그 `%LOCALAPPDATA%\bdo-optimizer-launcher`는 진단·재설치를 위해 남으므로, 완전 삭제가 필요하면 제거 후 직접 지우세요.
+
+### 게임 런처가 거부됨
+관리자 권한으로 실행되는 자식 런처는 유효한 Authenticode 서명과 발행자 `Pearl abyss Corp`가 모두 확인될 때만 허용됩니다. 공식 런처인데도 거부되면 임의 파일로 바꾸지 말고 검은사막 런처의 복구 또는 재설치를 실행하세요.
 
 ### 모니터 탭의 FPS가 "측정 중..." 또는 0으로 표시됨
 - ETW(이벤트 추적 윈도우) 세션 초기화 실패 가능성. 관리자 권한 확인.
@@ -136,8 +145,8 @@ bdo-optimizer-launcher.exe
 
 - **언어**: Rust (edition 2021) + Tauri v2 + React/Vite
 - **빌드**: `npm run tauri:build` (frontend를 exe에 임베드. ⚠️ bare `cargo build --release`는 devUrl이 박혀 실행 시 127.0.0.1 연결 거부가 난다)
-- **테스트**: `cargo test --all-targets --locked`
-- **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps --locked -- -D warnings` / `npm run check:design-parity` / `npm run build`
+- **테스트**: `cargo test --all-targets --locked` / `npm test`
+- **검증**: `cargo fmt --all -- --check` / `cargo clippy --all-targets --no-deps --locked -- -D warnings` / `npm audit` / `npm run check:design-parity` / `npm run build`
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`, `release.yml`)
 - **라이센스**: 본 저장소 LICENSE 파일 참고. 임베드 폰트(Pretendard)는 SIL Open Font License 1.1.
 

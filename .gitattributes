@@ -1,0 +1,3 @@
+docs/distribution/manual.html text eol=lf
+windows/hooks.nsh text eol=lf
+windows/installer.nsi text eol=lf

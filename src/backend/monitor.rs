@@ -11,14 +11,20 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
 use windows::Win32::System::Performance::{
-    PdhAddCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_FMT_LARGE,
+    PdhAddCounterW, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
+    PdhExpandWildCardPathW, PdhGetCounterInfoW, PdhGetFormattedCounterValue, PdhOpenQueryW,
+    PdhRemoveCounter, PDH_COUNTER_INFO_W, PDH_FMT, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE,
+    PDH_FMT_LARGE, PDH_REFRESHCOUNTERS,
 };
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
 // PDH 핸들은 windows 0.58에서 raw isize. 의미 명확화를 위해 alias로 표시한다.
 type PdhQuery = isize;
 type PdhCounter = isize;
+struct NamedPdhCounter {
+    handle: PdhCounter,
+    instance: String,
+}
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
     GetProcessAffinityMask, GetProcessIoCounters, GetProcessTimes, OpenProcess, IO_COUNTERS,
@@ -47,9 +53,10 @@ pub struct Monitor {
     prev_io_write: Option<u64>,
     cores: u32,
     pdh_query: Option<PdhQuery>,
-    pdh_gpu_util: Option<PdhCounter>,
-    pdh_gpu_mem: Option<PdhCounter>,
-    pdh_cpu_cores: Option<PdhCounter>,
+    pdh_gpu_util: Vec<NamedPdhCounter>,
+    pdh_gpu_mem: Vec<NamedPdhCounter>,
+    pdh_cpu_cores: Vec<NamedPdhCounter>,
+    pdh_retry_after: Option<Instant>,
     pub total_ram_mb: u64,
     pub total_vram_mb: u64,
 }
@@ -67,9 +74,10 @@ impl Monitor {
             prev_io_write: None,
             cores,
             pdh_query: None,
-            pdh_gpu_util: None,
-            pdh_gpu_mem: None,
-            pdh_cpu_cores: None,
+            pdh_gpu_util: Vec::new(),
+            pdh_gpu_mem: Vec::new(),
+            pdh_cpu_cores: Vec::new(),
+            pdh_retry_after: None,
             total_ram_mb: unsafe { query_total_ram_mb() },
             total_vram_mb: unsafe { query_total_vram_mb() },
         }
@@ -97,9 +105,10 @@ impl Monitor {
                 let _ = PdhCloseQuery(q);
             }
         }
-        self.pdh_gpu_util = None;
-        self.pdh_gpu_mem = None;
-        self.pdh_cpu_cores = None;
+        self.pdh_gpu_util.clear();
+        self.pdh_gpu_mem.clear();
+        self.pdh_cpu_cores.clear();
+        self.pdh_retry_after = None;
     }
 
     unsafe fn setup_pdh(&mut self, pid: u32) {
@@ -113,20 +122,18 @@ impl Monitor {
             r"\GPU Engine(pid_{}_*engtype_3D)\Utilization Percentage",
             pid
         );
-        if let Some(h) = pdh_add_counter(hq, &util_path) {
-            self.pdh_gpu_util = Some(h);
-        }
+        self.pdh_gpu_util = pdh_add_english_wildcard_counters(hq, &util_path);
 
         let mem_path = format!(r"\GPU Process Memory(pid_{}_*)\Dedicated Usage", pid);
-        if let Some(h) = pdh_add_counter(hq, &mem_path) {
-            self.pdh_gpu_mem = Some(h);
-        }
+        self.pdh_gpu_mem = pdh_add_english_wildcard_counters(hq, &mem_path);
 
         // 시스템 코어별 사용률 — PID 독립 wildcard. _Total은 sample 시 필터.
         let cpu_path = r"\Processor Information(*)\% Processor Time";
-        if let Some(h) = pdh_add_counter(hq, cpu_path) {
-            self.pdh_cpu_cores = Some(h);
-        }
+        self.pdh_cpu_cores = pdh_add_english_wildcard_counters(hq, cpu_path);
+        self.pdh_retry_after = (self.pdh_gpu_util.is_empty()
+            || self.pdh_gpu_mem.is_empty()
+            || self.pdh_cpu_cores.is_empty())
+        .then(|| Instant::now() + std::time::Duration::from_secs(5));
 
         // 더미 collect 1회 — 차분 기반 카운터의 첫 표본 0 회피
         let _ = PdhCollectQueryData(hq);
@@ -138,6 +145,15 @@ impl Monitor {
         }
 
         let now = Instant::now();
+        if self
+            .pdh_retry_after
+            .is_some_and(|retry_after| now >= retry_after)
+        {
+            self.close_pdh();
+            unsafe {
+                self.setup_pdh(pid);
+            }
+        }
         let dt = self
             .prev_instant
             .map(|p| (now - p).as_secs_f64())
@@ -167,14 +183,10 @@ impl Monitor {
             unsafe {
                 let _ = PdhCollectQueryData(q);
             }
-            sample.gpu_pct = self.pdh_gpu_util.and_then(|c| unsafe { pdh_sum_double(c) });
-            sample.vram_mb = self
-                .pdh_gpu_mem
-                .and_then(|c| unsafe { pdh_sum_large(c).map(|b| (b / 1024 / 1024) as u64) });
-            sample.core_usages = self
-                .pdh_cpu_cores
-                .map(|c| unsafe { pdh_collect_per_core(c) })
-                .unwrap_or_default();
+            sample.gpu_pct = unsafe { pdh_sum_double(&self.pdh_gpu_util) };
+            sample.vram_mb =
+                unsafe { pdh_sum_large(&self.pdh_gpu_mem).map(|b| (b / 1024 / 1024) as u64) };
+            sample.core_usages = unsafe { pdh_collect_per_core(&self.pdh_cpu_cores) };
         }
 
         sample
@@ -306,99 +318,147 @@ unsafe fn pwstr_to_string(p: PWSTR) -> String {
     String::from_utf16_lossy(slice)
 }
 
-// PDH_FMT_COUNTERVALUE_ITEM_W는 PWSTR 포인터 + i64/f64 union을 포함해 8바이트 정렬을 요구한다.
-// 정렬 1짜리 Vec<u8>를 캐스팅해 참조를 만들면 미정렬 참조 생성으로 UB가 되므로, 8정렬이 보장되는
-// Vec<u64> 버퍼에 PDH가 쓰게 한다. 아래 const 단언으로 8정렬 가정을 컴파일 타임에 고정한다.
-const _: () =
-    assert!(std::mem::align_of::<PDH_FMT_COUNTERVALUE_ITEM_W>() <= std::mem::align_of::<u64>());
+const _: () = assert!(std::mem::align_of::<PDH_COUNTER_INFO_W>() <= std::mem::align_of::<u64>());
 
-// PDH 2-call 패턴: 크기 질의 → 8정렬 버퍼 할당 → 채우기. 성공 시 (버퍼, item_count) 반환.
-// 반환된 버퍼는 호출처가 살려둬야 item의 szName 포인터(버퍼 내부 문자열 영역)가 유효하다.
-unsafe fn pdh_collect_raw(counter: PdhCounter, fmt: PDH_FMT) -> Option<(Vec<u64>, usize)> {
-    let mut buffer_size: u32 = 0;
-    let mut item_count: u32 = 0;
-    let _ = PdhGetFormattedCounterArrayW(counter, fmt, &mut buffer_size, &mut item_count, None);
-    if buffer_size == 0 || item_count == 0 {
+fn split_multi_sz(buffer: &[u16]) -> Vec<String> {
+    buffer
+        .split(|value| *value == 0)
+        .take_while(|part| !part.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
+fn counter_instance(path: &str) -> Option<String> {
+    let end = path.rfind(")\\")?;
+    let start = path[..end].rfind('(')?;
+    Some(path[start + 1..end].to_string())
+}
+
+unsafe fn localized_wildcard_path(counter: PdhCounter) -> Option<String> {
+    let mut byte_len = 0u32;
+    let _ = PdhGetCounterInfoW(counter, false, &mut byte_len, None);
+    if byte_len == 0 {
         return None;
     }
-    // ceil(buffer_size / 8) u64 = 8정렬 + 최소 buffer_size 바이트 확보.
-    let words = (buffer_size as usize).div_ceil(std::mem::size_of::<u64>());
-    let mut buf = vec![0u64; words];
-    let res = PdhGetFormattedCounterArrayW(
-        counter,
-        fmt,
-        &mut buffer_size,
-        &mut item_count,
-        Some(buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W),
+    let mut buffer = vec![0u64; (byte_len as usize).div_ceil(std::mem::size_of::<u64>())];
+    let info = buffer.as_mut_ptr() as *mut PDH_COUNTER_INFO_W;
+    let status = PdhGetCounterInfoW(counter, false, &mut byte_len, Some(info));
+    if status != 0 {
+        tracing::warn!(status, "PDH counter info lookup failed");
+        return None;
+    }
+    Some(pwstr_to_string((*info).szFullPath))
+}
+
+unsafe fn expand_localized_wildcard(path: &str) -> Vec<String> {
+    let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut char_len = 0u32;
+    let _ = PdhExpandWildCardPathW(
+        PCWSTR::null(),
+        PCWSTR(path_w.as_ptr()),
+        PWSTR::null(),
+        &mut char_len,
+        PDH_REFRESHCOUNTERS,
     );
-    if res != 0 {
-        return None;
+    if char_len == 0 {
+        return Vec::new();
     }
-    Some((buf, item_count as usize))
+    let mut buffer = vec![0u16; char_len as usize];
+    let status = PdhExpandWildCardPathW(
+        PCWSTR::null(),
+        PCWSTR(path_w.as_ptr()),
+        PWSTR(buffer.as_mut_ptr()),
+        &mut char_len,
+        PDH_REFRESHCOUNTERS,
+    );
+    if status != 0 {
+        tracing::warn!(status, "PDH wildcard expansion failed");
+        return Vec::new();
+    }
+    split_multi_sz(&buffer[..char_len as usize])
 }
 
-// 8정렬 버퍼에서 item_count개의 item 슬라이스를 본다. 버퍼 수명 동안만 유효하다.
-unsafe fn pdh_items(buf: &[u64], item_count: usize) -> &[PDH_FMT_COUNTERVALUE_ITEM_W] {
-    std::slice::from_raw_parts(
-        buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W,
-        item_count,
-    )
-}
-
-// `\Processor Information(*)\% Processor Time`에서 코어별 사용률을 수집한다.
-// instance name이 "_Total"이면 제외, "group,cpu" 파싱 후 정렬된 코어 인덱스 순서로 반환.
-unsafe fn pdh_collect_per_core(counter: PdhCounter) -> Vec<f64> {
-    let Some((buf, count)) = pdh_collect_raw(counter, PDH_FMT_DOUBLE) else {
+unsafe fn pdh_add_english_wildcard_counters(
+    query: PdhQuery,
+    english_path: &str,
+) -> Vec<NamedPdhCounter> {
+    let english_w: Vec<u16> = english_path
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut temporary = 0;
+    let status = PdhAddEnglishCounterW(query, PCWSTR(english_w.as_ptr()), 0, &mut temporary);
+    if status != 0 {
+        tracing::warn!(
+            status,
+            english_path,
+            "PDH English counter registration failed"
+        );
+        return Vec::new();
+    }
+    let localized = localized_wildcard_path(temporary);
+    let _ = PdhRemoveCounter(temporary);
+    let Some(localized) = localized else {
         return Vec::new();
     };
-    let items = pdh_items(&buf, count);
-    let mut pairs: Vec<((u32, u32), f64)> = Vec::with_capacity(count);
-    for item in items {
-        let name = pwstr_to_string(item.szName);
-        if name == "_Total" {
-            continue;
-        }
-        if let Some(key) = parse_instance(&name) {
-            pairs.push((key, item.FmtValue.Anonymous.doubleValue));
-        }
-    }
-    pairs.sort_by_key(|a| a.0);
-    pairs.into_iter().map(|(_, v)| v).collect()
+
+    expand_localized_wildcard(&localized)
+        .into_iter()
+        .filter_map(|path| {
+            let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut handle = 0;
+            let status = PdhAddCounterW(query, PCWSTR(path_w.as_ptr()), 0, &mut handle);
+            if status != 0 {
+                tracing::warn!(status, path, "PDH localized counter registration failed");
+                return None;
+            }
+            Some(NamedPdhCounter {
+                handle,
+                instance: counter_instance(&path).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+unsafe fn pdh_scalar(counter: PdhCounter, format: PDH_FMT) -> Option<PDH_FMT_COUNTERVALUE> {
+    let mut value = PDH_FMT_COUNTERVALUE::default();
+    let status = PdhGetFormattedCounterValue(counter, format, None, &mut value);
+    (status == 0 && value.CStatus <= 1).then_some(value)
+}
+
+unsafe fn pdh_collect_per_core(counters: &[NamedPdhCounter]) -> Vec<f64> {
+    let mut pairs = counters
+        .iter()
+        .filter_map(|counter| {
+            let key = parse_instance(&counter.instance)?;
+            let value = pdh_scalar(counter.handle, PDH_FMT_DOUBLE)?;
+            Some((key, value.Anonymous.doubleValue))
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_by_key(|pair| pair.0);
+    pairs.into_iter().map(|(_, value)| value).collect()
 }
 
 fn filetime_to_u64(ft: FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
 }
 
-fn pdh_add_counter(hq: PdhQuery, path: &str) -> Option<PdhCounter> {
-    let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut h: PdhCounter = 0;
-    let res = unsafe { PdhAddCounterW(hq, PCWSTR(path_w.as_ptr()), 0, &mut h) };
-    if res == 0 {
-        Some(h)
-    } else {
-        None
-    }
+unsafe fn pdh_sum_double(counters: &[NamedPdhCounter]) -> Option<f64> {
+    let values = counters
+        .iter()
+        .filter_map(|counter| pdh_scalar(counter.handle, PDH_FMT_DOUBLE))
+        .map(|value| value.Anonymous.doubleValue)
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.into_iter().sum())
 }
 
-// buf를 합산이 끝날 때까지 살려둔 채 FmtValue(인라인 union)만 읽는다. item을 Vec로 복사해
-// 반환하면 szName이 해제된 buf를 가리키는 dangling 포인터가 되므로 그렇게 하지 않는다.
-unsafe fn pdh_sum_double(counter: PdhCounter) -> Option<f64> {
-    let (buf, count) = pdh_collect_raw(counter, PDH_FMT_DOUBLE)?;
-    let sum: f64 = pdh_items(&buf, count)
+unsafe fn pdh_sum_large(counters: &[NamedPdhCounter]) -> Option<i64> {
+    let values = counters
         .iter()
-        .map(|i| i.FmtValue.Anonymous.doubleValue)
-        .sum();
-    Some(sum)
-}
-
-unsafe fn pdh_sum_large(counter: PdhCounter) -> Option<i64> {
-    let (buf, count) = pdh_collect_raw(counter, PDH_FMT_LARGE)?;
-    let sum: i64 = pdh_items(&buf, count)
-        .iter()
-        .map(|i| i.FmtValue.Anonymous.largeValue)
-        .sum();
-    Some(sum)
+        .filter_map(|counter| pdh_scalar(counter.handle, PDH_FMT_LARGE))
+        .map(|value| value.Anonymous.largeValue)
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.into_iter().sum())
 }
 
 impl Drop for Monitor {
@@ -409,7 +469,7 @@ impl Drop for Monitor {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_instance;
+    use super::*;
 
     #[test]
     fn parse_instance_splits_group_and_cpu() {
@@ -424,5 +484,32 @@ mod tests {
         assert_eq!(parse_instance("0,_total"), None);
         assert_eq!(parse_instance(""), None);
         assert_eq!(parse_instance("3"), None);
+    }
+
+    #[test]
+    fn multi_sz_and_localized_counter_instance_are_parsed() {
+        let buffer = [b'a' as u16, 0, b'b' as u16, b'c' as u16, 0, 0];
+        assert_eq!(split_multi_sz(&buffer), vec!["a", "bc"]);
+        assert_eq!(
+            counter_instance(r"\프로세서 정보(0,7)\% 프로세서 시간").as_deref(),
+            Some("0,7")
+        );
+    }
+
+    #[test]
+    fn english_cpu_wildcard_expands_on_current_windows_locale() {
+        unsafe {
+            let mut query = 0;
+            assert_eq!(PdhOpenQueryW(PCWSTR::null(), 0, &mut query), 0);
+            let counters = pdh_add_english_wildcard_counters(
+                query,
+                r"\Processor Information(*)\% Processor Time",
+            );
+            let _ = PdhCloseQuery(query);
+            assert!(!counters.is_empty());
+            assert!(counters
+                .iter()
+                .any(|counter| parse_instance(&counter.instance).is_some()));
+        }
     }
 }

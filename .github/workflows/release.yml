@@ -1,33 +1,110 @@
 name: Release
 
-# tag push 시 .exe artifact 빌드 + GitHub Release 자동 생성.
-# 코드사이닝 미적용 (사용자 결정 2026-05-24). SmartScreen 우회 안내는 README.md 참고.
-# 사용법: `git tag v0.2.0 && git push origin v0.2.0`
+# 기본 브랜치의 신뢰된 workflow_dispatch로만 per-machine NSIS installer를 빌드한다.
+# 코드사이닝 미적용 (사용자 결정 2026-05-24). SmartScreen 안내는 README.md 참고.
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       tag:
         description: 'Release tag (예: v0.2.0)'
         required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: write  # GitHub Release 생성 + asset 업로드
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: Build Windows release
+    name: Build and verify Windows installer
     runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      release_tag: ${{ steps.release_meta.outputs.release_tag }}
+      tag_commit: ${{ steps.release_meta.outputs.tag_commit }}
+      prerelease: ${{ steps.release_meta.outputs.prerelease }}
     steps:
+      - name: Validate trusted release target and successful CI
+        id: release_meta
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw "Release tag is not canonical SemVer: $tag"
+          }
+          $semver = [System.Management.Automation.SemanticVersion]::new($tag.Substring(1))
+          if ($semver.ToString() -cne $tag.Substring(1)) { throw "Release tag is not canonical SemVer: $tag" }
+          if ($env:WORKFLOW_REF -cne "refs/heads/$env:DEFAULT_BRANCH") {
+            throw "Release workflow must run from the trusted default branch: $env:WORKFLOW_REF"
+          }
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $api = "https://api.github.com/repos/$env:REPOSITORY"
+          $ref = Invoke-RestMethod -Uri "$api/git/ref/tags/$tag" -Headers $headers
+          $target = $ref.object
+          for ($depth = 0; $target.type -eq 'tag' -and $depth -lt 8; $depth++) {
+            $target = (Invoke-RestMethod -Uri "$api/git/tags/$($target.sha)" -Headers $headers).object
+          }
+          if ($target.type -ne 'commit') { throw "Release tag does not resolve to a commit: $tag" }
+          $tagCommit = [string]$target.sha
+
+          $comparison = Invoke-RestMethod -Uri "$api/compare/$tagCommit...$env:DEFAULT_BRANCH" -Headers $headers
+          if ($comparison.status -notin @('ahead', 'identical')) {
+            throw "Tag commit is not an ancestor of origin/$env:DEFAULT_BRANCH: $tagCommit"
+          }
+
+          $runs = Invoke-RestMethod -Uri "$api/actions/workflows/ci.yml/runs?head_sha=$tagCommit&status=success&per_page=100" -Headers $headers
+          $successfulRuns = @($runs.workflow_runs | Where-Object {
+            $_.head_sha -ceq $tagCommit -and $_.status -eq 'completed' -and $_.conclusion -eq 'success'
+          })
+          if ($successfulRuns.Count -eq 0) { throw "No successful CI run exists for tag commit: $tagCommit" }
+
+          "release_tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag_commit=$tagCommit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$((0 -lt $semver.PreReleaseLabel.Length).ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checked-out tag ancestry and release contract
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_COMMIT: ${{ steps.release_meta.outputs.tag_commit }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          $tagCommit = (git rev-parse "refs/tags/$env:RELEASE_TAG^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_COMMIT -or $tagCommit -cne $env:EXPECTED_COMMIT) {
+            throw "Checked-out commit does not match tag $env:RELEASE_TAG"
+          }
+          git fetch --no-tags origin "refs/heads/$env:DEFAULT_BRANCH`:refs/remotes/origin/$env:DEFAULT_BRANCH"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to fetch origin/$env:DEFAULT_BRANCH" }
+          git merge-base --is-ancestor $head "origin/$env:DEFAULT_BRANCH"
+          if ($LASTEXITCODE -ne 0) { throw "Tag commit is not an ancestor of origin/$env:DEFAULT_BRANCH" }
+          ./scripts/check_release_workflow.ps1 -ReleaseTag $env:RELEASE_TAG
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -49,32 +126,20 @@ jobs:
       - name: npm audit
         run: npm audit --audit-level=high
 
+      - name: Frontend tests
+        run: npm test
+
       - name: Design parity check
         run: npm run check:design-parity
 
       - name: Frontend build
         run: npm run build
 
-      - name: Validate release tag matches Cargo.toml version
-        shell: pwsh
-        run: |
-          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
-            throw "Release tag must look like vX.Y.Z or vX.Y.Z-prerelease: $tag"
-          }
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
 
-          $versionLine = Select-String -LiteralPath "Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-          if ($null -eq $versionLine) {
-            throw "Cargo.toml package.version not found"
-          }
-
-          $cargoVersion = $versionLine.Matches[0].Groups[1].Value
-          $expectedTag = "v$cargoVersion"
-          if ($tag -ne $expectedTag) {
-            throw "Release tag '$tag' does not match Cargo.toml version '$cargoVersion' (expected '$expectedTag')"
-          }
-
-          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Cargo audit
+        run: cargo audit
 
       - name: Cargo fmt --check
         run: cargo fmt --all -- --check
@@ -85,60 +150,144 @@ jobs:
       - name: Cargo test
         run: cargo test --all-targets --locked
 
-      - name: Tauri build (embeds frontend into the exe)
-        # NOTE: bare `cargo build --release` does NOT embed the frontend — it bakes in
-        # the devUrl (http://127.0.0.1:1421), producing an exe that shows
-        # "127.0.0.1 refused to connect". `tauri build` enables custom-protocol asset
-        # embedding so the exe serves the bundled UI from tauri://localhost.
-        # (bundle.active=false in tauri.conf.json, so no installer is produced — exe only.)
+      - name: Tauri build (production assets + per-machine NSIS)
         run: npm run tauri:build
 
-      - name: Verify .exe exists
+      - name: Verify production embed and normalize installer name
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
         run: |
-          if (-not (Test-Path "target/release/bdo-optimizer-launcher.exe")) {
-            throw "Build artifact missing: target/release/bdo-optimizer-launcher.exe"
+          $version = $env:RELEASE_TAG.Substring(1)
+          ./scripts/check_tauri_embed.ps1 -Executable target/release/bdo-optimizer-launcher.exe -ExpectedVersion $version -ExpectedExecutionLevel requireAdministrator
+          $installers = @(Get-ChildItem -LiteralPath target/release/bundle/nsis -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)"
           }
-          $size = (Get-Item "target/release/bdo-optimizer-launcher.exe").Length
-          Write-Host "Artifact size: $size bytes"
+          Copy-Item -LiteralPath $installers[0].FullName -Destination target/release/bdo-optimizer-launcher-setup.exe
 
-      - name: Compute SHA-256 hash
+      - name: Smoke test install, upgrade, and uninstall cleanup
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          ./scripts/smoke_test_installer.ps1 -Installer target/release/bdo-optimizer-launcher-setup.exe -ExpectedVersion $version -AllowSystemChanges
+
+      - name: Compute installer SHA-256
         shell: pwsh
         run: |
-          $hash = (Get-FileHash "target/release/bdo-optimizer-launcher.exe" -Algorithm SHA256).Hash
-          Write-Host "SHA-256: $hash"
-          "$hash  bdo-optimizer-launcher.exe" | Out-File -FilePath "target/release/SHA256SUMS.txt" -Encoding ascii
+          $installer = "target/release/bdo-optimizer-launcher-setup.exe"
+          $installerHash = (Get-FileHash $installer -Algorithm SHA256).Hash
+          $manualHash = (Get-FileHash docs/distribution/manual.pdf -Algorithm SHA256).Hash
+          @(
+            "$installerHash  bdo-optimizer-launcher-setup.exe"
+            "$manualHash  manual.pdf"
+          ) | Out-File -FilePath "target/release/SHA256SUMS.txt" -Encoding ascii
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          Copy-Item -LiteralPath $installer -Destination release-assets/bdo-optimizer-launcher-setup.exe
+          Copy-Item -LiteralPath target/release/SHA256SUMS.txt -Destination release-assets/SHA256SUMS.txt
+          Copy-Item -LiteralPath docs/distribution/manual.pdf -Destination release-assets/manual.pdf
 
-      - name: Upload .exe as workflow artifact
+      - name: Upload verified release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: bdo-optimizer-launcher-${{ env.RELEASE_TAG }}
-          path: |
-            target/release/bdo-optimizer-launcher.exe
-            target/release/SHA256SUMS.txt
-            docs/distribution/manual.pdf
+          name: bdo-optimizer-launcher-${{ steps.release_meta.outputs.release_tag }}
+          path: release-assets/
+          if-no-files-found: error
           retention-days: 90
 
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    environment: release
+    steps:
+      - name: Revalidate release tag identity
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_COMMIT: ${{ needs.build.outputs.tag_commit }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $api = "https://api.github.com/repos/$env:REPOSITORY"
+          $ref = Invoke-RestMethod -Uri "$api/git/ref/tags/$env:RELEASE_TAG" -Headers $headers
+          $target = $ref.object
+          for ($depth = 0; $target.type -eq 'tag' -and $depth -lt 8; $depth++) {
+            $target = (Invoke-RestMethod -Uri "$api/git/tags/$($target.sha)" -Headers $headers).object
+          }
+          if ($target.type -ne 'commit' -or [string]$target.sha -cne $env:EXPECTED_COMMIT) {
+            throw "Release tag identity changed after build: $env:RELEASE_TAG"
+          }
+          $comparison = Invoke-RestMethod -Uri "$api/compare/$env:EXPECTED_COMMIT...$env:DEFAULT_BRANCH" -Headers $headers
+          if ($comparison.status -notin @('ahead', 'identical')) {
+            throw "Validated release commit is no longer an ancestor of $env:DEFAULT_BRANCH"
+          }
+
+      - name: Reject an existing release tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $uri = "https://api.github.com/repos/$env:REPOSITORY/releases/tags/$env:RELEASE_TAG"
+          try {
+            Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" } | Out-Null
+            throw "Release already exists: $env:RELEASE_TAG"
+          } catch {
+            if ($_.Exception.Message -like "Release already exists:*") { throw }
+            if ([int]$_.Exception.Response.StatusCode -ne 404) { throw }
+          }
+
+      - name: Download verified release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bdo-optimizer-launcher-${{ needs.build.outputs.release_tag }}
+          path: release-assets
+
+      - name: Verify downloaded release asset hashes
+        shell: pwsh
+        run: |
+          $expected = @{}
+          Get-Content release-assets/SHA256SUMS.txt | ForEach-Object {
+            if ($_ -notmatch '^([0-9A-Fa-f]{64})  (.+)$') { throw "Invalid SHA256SUMS line: $_" }
+            $expected[$Matches[2]] = $Matches[1].ToUpperInvariant()
+          }
+          foreach ($name in @('bdo-optimizer-launcher-setup.exe', 'manual.pdf')) {
+            if (-not $expected.ContainsKey($name)) { throw "Missing hash entry: $name" }
+            $actual = (Get-FileHash "release-assets/$name" -Algorithm SHA256).Hash
+            if ($actual -cne $expected[$name]) { throw "Hash mismatch: $name" }
+          }
+
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_TAG }}
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          name: ${{ needs.build.outputs.release_tag }}
           draft: false
-          prerelease: ${{ contains(env.RELEASE_TAG, '-rc') || contains(env.RELEASE_TAG, '-beta') }}
+          prerelease: ${{ needs.build.outputs.prerelease }}
           generate_release_notes: true
           body: |
-            ## bdo-optimizer-launcher ${{ env.RELEASE_TAG }}
+            ## bdo-optimizer-launcher ${{ needs.build.outputs.release_tag }}
 
-            **SmartScreen 우회**: 첫 실행 시 "추가 정보 → 실행" — 자세한 안내는 README.md 참고.
+            `bdo-optimizer-launcher-setup.exe`를 실행해 Program Files에 설치하세요.
+            코드사이닝 미적용으로 첫 설치 시 SmartScreen이 표시될 수 있습니다.
 
-            **SHA-256 무결성 검증**: `SHA256SUMS.txt` 파일과 다운로드한 .exe의 해시 비교 권장.
-
+            **SHA-256 무결성 검증**: `SHA256SUMS.txt`와 설치 프로그램의 해시를 비교하세요.
             **요구사항**: Windows 10 1809+ / x64 / 관리자 권한.
-
-            **변경 이력**: 자동 생성된 commit log 참고.
           files: |
-            target/release/bdo-optimizer-launcher.exe
-            target/release/SHA256SUMS.txt
-            docs/distribution/manual.pdf
+            release-assets/bdo-optimizer-launcher-setup.exe
+            release-assets/SHA256SUMS.txt
+            release-assets/manual.pdf
+          fail_on_unmatched_files: true
+          overwrite_files: false

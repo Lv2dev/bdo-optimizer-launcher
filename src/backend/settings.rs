@@ -42,9 +42,30 @@ pub const UPDATE_CHECK_INTERVAL_OPTIONS_MS: [u32; 5] = [
 ];
 
 pub const ACCENT_PALETTE_COUNT: u32 = 4;
+pub const MONITOR_INTERVAL_OPTIONS_MS: [u32; 3] = [500, 1000, 2000];
+
+#[derive(thiserror::Error, Debug)]
+pub enum SaveError {
+    #[error("설정 저장 경로를 확인할 수 없습니다.")]
+    PathUnavailable,
+    #[error("설정 디렉터리 생성 실패: {0}")]
+    CreateDir(std::io::Error),
+    #[error("설정 직렬화 실패: {0}")]
+    Serialize(serde_json::Error),
+    #[error("설정 파일 저장 실패: {0}")]
+    Write(std::io::Error),
+}
 
 pub fn is_supported_accent_palette(palette: u32) -> bool {
     palette < ACCENT_PALETTE_COUNT
+}
+
+pub fn normalize_monitor_interval_ms(ms: u32) -> u32 {
+    if MONITOR_INTERVAL_OPTIONS_MS.contains(&ms) {
+        ms
+    } else {
+        default_monitor_interval()
+    }
 }
 
 // M96 P3: 모니터 폴링 기본 간격(ms). 기존 고정값 1초와 동일하게 둔다.
@@ -136,8 +157,12 @@ pub fn load_settings() -> AppSettings {
         Ok(c) => c,
         Err(_) => return AppSettings::default(), // 파일 없음/읽기 실패 = 신규 사용자
     };
-    match serde_json::from_str(&content) {
-        Ok(settings) => settings,
+    match serde_json::from_str::<AppSettings>(&content) {
+        Ok(mut settings) => {
+            settings.monitor_interval_ms =
+                normalize_monitor_interval_ms(settings.monitor_interval_ms);
+            settings
+        }
         Err(error) => {
             // 손상 JSON을 조용히 기본값으로 덮어쓰지 않고, 원본을 백업하고 경고를 남긴다.
             tracing::warn!(error = %error, "settings.json 파싱 실패 — 손상 파일 백업 후 기본값 사용");
@@ -147,17 +172,17 @@ pub fn load_settings() -> AppSettings {
     }
 }
 
-pub fn save_settings(settings: &AppSettings) {
-    let path = match settings_path() {
-        Some(p) => p,
-        None => return,
-    };
+fn save_settings_to_path(settings: &AppSettings, path: &std::path::Path) -> Result<(), SaveError> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(SaveError::CreateDir)?;
     }
-    if let Ok(json) = serde_json::to_string(settings) {
-        let _ = super::atomic_write(&path, json.as_bytes());
-    }
+    let json = serde_json::to_vec(settings).map_err(SaveError::Serialize)?;
+    super::atomic_write(path, &json).map_err(SaveError::Write)
+}
+
+pub fn save_settings(settings: &AppSettings) -> Result<(), SaveError> {
+    let path = settings_path().ok_or(SaveError::PathUnavailable)?;
+    save_settings_to_path(settings, &path)
 }
 
 // schedule.rs와 동일 정책: 깨진 JSON은 빈/기본값으로 덮어쓰지 않도록 타임스탬프 백업.
@@ -297,5 +322,30 @@ mod tests {
             Some("0.1.2"),
             restored.last_update_notified_version.as_deref()
         );
+    }
+
+    #[test]
+    fn save_settings_reports_directory_creation_failure() {
+        let blocker = std::env::temp_dir().join(format!(
+            "bdo-optimizer-settings-blocker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&blocker);
+        std::fs::write(&blocker, b"file blocks directory").unwrap();
+
+        let result = save_settings_to_path(&AppSettings::default(), &blocker.join("settings.json"));
+
+        std::fs::remove_file(&blocker).unwrap();
+        assert!(matches!(result, Err(SaveError::CreateDir(_))));
+    }
+
+    #[test]
+    fn monitor_interval_normalization_allows_only_ui_contract_values() {
+        assert_eq!(500, normalize_monitor_interval_ms(500));
+        assert_eq!(1000, normalize_monitor_interval_ms(1000));
+        assert_eq!(2000, normalize_monitor_interval_ms(2000));
+        assert_eq!(1000, normalize_monitor_interval_ms(1));
+        assert_eq!(1000, normalize_monitor_interval_ms(1500));
+        assert_eq!(1000, normalize_monitor_interval_ms(u32::MAX));
     }
 }

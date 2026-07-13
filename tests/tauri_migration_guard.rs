@@ -113,3 +113,43 @@ fn tauri_config_keeps_csp_defense() {
         "tauri.conf.json CSP must define default-src"
     );
 }
+
+#[test]
+fn windows_bundle_is_per_machine_nsis_with_uninstall_cleanup() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let conf: serde_json::Value =
+        serde_json::from_str(&read_text(root, "tauri.conf.json")).unwrap();
+    let bundle = &conf["bundle"];
+
+    assert_eq!(bundle["active"], true);
+    assert_eq!(bundle["targets"], serde_json::json!(["nsis"]));
+    assert_eq!(bundle["windows"]["nsis"]["installMode"], "perMachine");
+    assert_eq!(
+        bundle["windows"]["nsis"]["installerHooks"],
+        "./windows/hooks.nsh"
+    );
+    assert_eq!(
+        bundle["windows"]["nsis"]["template"],
+        "./windows/installer.nsi"
+    );
+
+    let hooks = read_text(root, "windows/hooks.nsh");
+    let template = read_text(root, "windows/installer.nsi");
+    assert!(hooks.contains("$UpdateMode = 1"));
+    assert!(!hooks.contains("_?="));
+    assert!(template.contains("existing NSIS uninstaller is never elevated"));
+    assert!(!template.contains("StrCpy $R1 \"$R1 /UPDATE\""));
+    assert!(hooks.contains("NSIS_HOOK_PREINSTALL"));
+    assert!(hooks.contains("NSIS_HOOK_POSTINSTALL"));
+    assert!(hooks.contains("NSIS_HOOK_PREDELETE"));
+    assert!(!hooks.contains("NSIS_HOOK_PREUNINSTALL"));
+    assert!(hooks.contains("Function BDO_RejectReparseTree"));
+    assert!(hooks.contains("/reset /T /L /Q"));
+    for task in [
+        "BDO_Optimizer_Launcher_Autostart",
+        "BDO_Auto_Shutdown_Once",
+        "BDO_Auto_Shutdown_Weekly",
+    ] {
+        assert!(hooks.contains(task), "uninstaller hook misses task {task}");
+    }
+}

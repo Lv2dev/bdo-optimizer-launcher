@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { mergePayload, normalizePayload } from "./payload.js";
+import { browserPreviewPayload, EMPTY_STATE } from "./browserPreview.js";
 import {
   Activity,
   Bolt,
@@ -35,84 +37,6 @@ import {
 } from "lucide-react";
 import "pretendard/dist/web/variable/pretendardvariable.css";
 import "./styles.css";
-
-const EMPTY_STATE = {
-  appVersion: "0.1.4",
-  status: {
-    current: "초기화 중입니다.",
-    previous: "",
-  },
-  control: {
-    adminOk: false,
-    gameRunning: false,
-    currentMode: null,
-    currentModeKnown: false,
-    launcherPath: "",
-  },
-  schedule: {
-    activeRuleInfo: "활성 규칙 없음.",
-    rules: [],
-    empty: true,
-  },
-  shutdown: {
-    onceText: "",
-    onceActive: false,
-    weeklyText: "",
-    weeklyActive: false,
-    weeklyDays: [],
-    weeklyTime: null,
-  },
-  settings: {
-    themeMode: "system",
-    effectiveDark: true,
-    accentPalette: 0,
-    reduceMotion: false,
-    autoTrayOnGameMinimize: false,
-    closeToTray: true,
-    autostartEnabled: false,
-    autostartMinimized: false,
-    launcherPath: "",
-    defaultMode: null,
-    monitorIntervalMs: 1000,
-    updateAlertEnabled: true,
-    updateCheckIntervalMs: 86400000,
-  },
-  update: {
-    statusText: "업데이트 확인 전.",
-    available: false,
-    checking: false,
-    releaseUrl: "",
-    appVersion: "0.1.4",
-    latestVersion: null,
-  },
-  monitor: {
-    running: false,
-    pid: null,
-    systemInfo: {
-      cpuName: "Unknown CPU",
-      gpuName: "Unknown GPU",
-      gpuNames: [],
-    },
-    totals: {
-      ramMb: 0,
-      vramMb: 0,
-    },
-    metrics: {
-      cpuPct: null,
-      memMb: null,
-      memPct: 0,
-      gpuPct: null,
-      vramMb: null,
-      vramPct: 0,
-      diskReadKbs: null,
-      diskWriteKbs: null,
-      fps: null,
-      fpsText: "세션 미시작",
-    },
-    cores: [],
-    statusText: "BlackDesert64.exe 프로세스를 찾을 수 없습니다.",
-  },
-};
 
 const UPDATE_CHECK_INTERVAL_OPTIONS = [
   { value: "21600000", label: "6시간" },
@@ -173,6 +97,33 @@ const TABS = [
   { label: "설정", icon: Settings, enabled: true },
 ];
 
+const PENDING_LABELS = {
+  init: "앱 상태 불러오는 중",
+  launch: "게임 런처 확인 중",
+  mode: "최적화 모드 적용 중",
+  refresh: "게임 상태 확인 중",
+  "schedule-load": "스케줄 불러오는 중",
+  "schedule-add": "스케줄 추가 중",
+  "schedule-delete": "스케줄 삭제 중",
+  "schedule-toggle": "스케줄 상태 변경 중",
+  "shutdown-load": "예약 종료 불러오는 중",
+  "shutdown-register": "예약 종료 등록 중",
+  "shutdown-cancel": "예약 종료 취소 중",
+  "settings-load": "설정 불러오는 중",
+  "settings-save": "설정 저장 중",
+  "update-check": "업데이트 확인 중",
+  "update-open": "릴리스 페이지 여는 중",
+  "log-open": "로그 폴더 여는 중",
+  "open-repo": "저장소 여는 중",
+};
+
+function pendingMessage(pending) {
+  const label = pending?.startsWith("setting-")
+    ? "설정 저장 중"
+    : PENDING_LABELS[pending] ?? "요청 처리 중";
+  return pending ? `${label}…` : "";
+}
+
 const GLASS_THEME = {
   mode: "dark",
   bg: "aurora",
@@ -196,12 +147,6 @@ function normalizeAccentPalette(value) {
   return Number.isInteger(asNumber) && asNumber >= 0 && asNumber < ACCENTS.length ? asNumber : 0;
 }
 
-let previewRules = [];
-let previewShutdown = EMPTY_STATE.shutdown;
-let previewSettings = EMPTY_STATE.settings;
-let previewUpdate = EMPTY_STATE.update;
-let previewMonitor = EMPTY_STATE.monitor;
-let previewMonitorTick = 0;
 
 function isTauriRuntime() {
   return Boolean(window.__TAURI_INTERNALS__);
@@ -226,6 +171,46 @@ function todayValue() {
 }
 
 const CAL_WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+const COMMAND_DOMAINS = {
+  refresh_game_status: "control",
+  launch_game: "control",
+  apply_mode: "control",
+  list_schedule_rules: "schedule",
+  add_schedule_rule: "schedule",
+  delete_schedule_rule: "schedule",
+  toggle_schedule_rule: "schedule",
+  get_shutdown_state: "shutdown",
+  register_shutdown: "shutdown",
+  cancel_shutdown: "shutdown",
+  get_settings: "settings",
+  set_setting: "settings",
+  check_for_updates: "update",
+  check_update_alert: "update",
+  get_monitor_snapshot: "monitor",
+};
+
+function focusAdjacentToTrigger(trigger, popup, backwards) {
+  if (!trigger) return;
+  const candidates = [...document.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
+    (element) =>
+      !popup?.contains(element) &&
+      !element.closest("[inert]") &&
+      !element.closest("[hidden]") &&
+      !element.closest('[aria-hidden="true"]'),
+  );
+  const index = candidates.indexOf(trigger);
+  const target = candidates[index + (backwards ? -1 : 1)];
+  (target ?? trigger).focus();
+}
 
 function parseDateValue(value) {
   const [year, month, day] = String(value || "")
@@ -283,341 +268,6 @@ function stepTimeValue(value, field, delta) {
   return formatTimeParts(parts.hour, parts.minute + delta);
 }
 
-function scheduleSummary(input) {
-  const kindLabel = input.kind === "specific_date" ? input.date : KIND_META[input.kind];
-  return `${input.name} | ${kindLabel} | ${input.startTime}-${input.endTime} | ${MODE_META[input.mode].label}`;
-}
-
-function previewScheduleState() {
-  const active = previewRules.find((rule) => rule.active);
-  return {
-    activeRuleInfo: active ? `활성 규칙: ${active.summary}` : "활성 규칙 없음.",
-    rules: previewRules,
-    empty: previewRules.length === 0,
-  };
-}
-
-function previewMonitorState() {
-  previewMonitorTick += 1;
-  const wave = (base, amp, phase = 0) =>
-    Math.max(0, Math.min(100, base + Math.sin(previewMonitorTick / 3 + phase) * amp));
-  const cpuPct = wave(18, 9);
-  const gpuPct = wave(34, 16, 1.2);
-  const memMb = Math.round(8200 + Math.sin(previewMonitorTick / 5) * 260);
-  const vramMb = Math.round(4100 + Math.sin(previewMonitorTick / 4 + 0.4) * 180);
-  const ramMb = 32768;
-  const vramTotalMb = 12288;
-  previewMonitor = {
-    running: true,
-    pid: 4321,
-    systemInfo: {
-      cpuName: "AMD Ryzen 7 7800X3D 8-Core Processor",
-      gpuName: "NVIDIA GeForce RTX 4080",
-      gpuNames: ["NVIDIA GeForce RTX 4080"],
-    },
-    totals: {
-      ramMb,
-      vramMb: vramTotalMb,
-    },
-    metrics: {
-      cpuPct,
-      memMb,
-      memPct: Math.min(100, (memMb / ramMb) * 100),
-      gpuPct,
-      vramMb,
-      vramPct: Math.min(100, (vramMb / vramTotalMb) * 100),
-      diskReadKbs: Math.round(120 + wave(60, 45, 2)),
-      diskWriteKbs: Math.round(36 + wave(18, 12, 3)),
-      fps: 144,
-      fpsText: "144 FPS",
-    },
-    cores: Array.from({ length: 8 }, (_, index) => ({
-      index,
-      usagePct: wave(16 + index * 2, 18, index / 2),
-      active: index < 8,
-    })),
-    statusText: "브라우저 미리보기 모니터링 중.",
-  };
-  return previewMonitor;
-}
-
-function browserPreviewPayload(command, args) {
-  if (command === "apply_mode") {
-    return {
-      status: {
-        current: `${MODE_META[args.mode].label} 모드 미리보기.`,
-        previous: "",
-      },
-      control: {
-        ...EMPTY_STATE.control,
-        currentMode: args.mode,
-        currentModeKnown: true,
-      },
-    };
-  }
-
-  if (command === "launch_game") {
-    return {
-      status: {
-        current: "Tauri 앱에서 게임 실행 명령을 사용할 수 있습니다.",
-        previous: "",
-      },
-      control: EMPTY_STATE.control,
-    };
-  }
-
-  if (command === "refresh_game_status") {
-    return {
-      status: {
-        current: "브라우저 미리보기 상태입니다.",
-        previous: "",
-      },
-      control: EMPTY_STATE.control,
-    };
-  }
-
-  if (command === "list_schedule_rules") {
-    return previewScheduleState();
-  }
-
-  if (command === "add_schedule_rule") {
-    const input = args.input;
-    const ruleInput = {
-      ...input,
-      name: input.name.trim() || "이름 없는 규칙",
-      date: input.kind === "specific_date" ? input.date : null,
-    };
-    const rule = {
-      id: Date.now(),
-      ...ruleInput,
-      active: true,
-      summary: scheduleSummary(ruleInput),
-    };
-    previewRules = [...previewRules, rule];
-    return {
-      status: { current: "스케줄 규칙이 추가되었습니다.", previous: "" },
-      schedule: previewScheduleState(),
-    };
-  }
-
-  if (command === "delete_schedule_rule") {
-    previewRules = previewRules.filter((rule) => rule.id !== args.id);
-    return {
-      status: { current: "스케줄 규칙이 삭제되었습니다.", previous: "" },
-      schedule: previewScheduleState(),
-    };
-  }
-
-  if (command === "toggle_schedule_rule") {
-    previewRules = previewRules.map((rule) =>
-      rule.id === args.id ? { ...rule, active: !rule.active } : rule,
-    );
-    return {
-      status: { current: "스케줄 규칙 상태가 변경되었습니다.", previous: "" },
-      schedule: previewScheduleState(),
-    };
-  }
-
-  if (command === "get_shutdown_state") {
-    return previewShutdown;
-  }
-
-  if (command === "get_settings") {
-    return previewSettings;
-  }
-
-  if (command === "get_monitor_snapshot") {
-    return {
-      monitor: previewMonitorState(),
-    };
-  }
-
-  if (command === "set_setting") {
-    const input = args.input;
-    if (input.key === "theme_mode") {
-      const themeMode = input.themeMode ?? previewSettings.themeMode;
-      previewSettings = {
-        ...previewSettings,
-        themeMode,
-        effectiveDark: themeMode === "system" ? true : themeMode === "dark",
-      };
-    } else if (input.key === "launcher_path") {
-      previewSettings = {
-        ...previewSettings,
-        launcherPath: input.stringValue ?? "",
-      };
-    } else if (input.key === "default_mode") {
-      previewSettings = {
-        ...previewSettings,
-        defaultMode: input.defaultMode ?? null,
-      };
-    } else if (input.key === "monitor_interval") {
-      previewSettings = {
-        ...previewSettings,
-        monitorIntervalMs: input.intValue ?? 1000,
-      };
-    } else if (input.key === "accent_palette") {
-      previewSettings = {
-        ...previewSettings,
-        accentPalette: normalizeAccentPalette(input.intValue),
-      };
-    } else if (input.key === "update_check_interval") {
-      previewSettings = {
-        ...previewSettings,
-        updateCheckIntervalMs: normalizeUpdateCheckIntervalMs(input.intValue),
-      };
-    } else {
-      const map = {
-        reduce_motion: "reduceMotion",
-        auto_tray_on_game_minimize: "autoTrayOnGameMinimize",
-        close_to_tray: "closeToTray",
-        autostart_enabled: "autostartEnabled",
-        autostart_minimized: "autostartMinimized",
-        update_alert_enabled: "updateAlertEnabled",
-      };
-      const field = map[input.key];
-      if (field) {
-        previewSettings = { ...previewSettings, [field]: Boolean(input.boolValue) };
-        if (input.key === "autostart_enabled" && !input.boolValue) {
-          previewSettings = { ...previewSettings, autostartMinimized: false };
-        }
-      }
-    }
-    return {
-      status: { current: "설정을 저장했습니다.", previous: "" },
-      settings: previewSettings,
-    };
-  }
-
-  if (command === "open_log_folder") {
-    return {
-      status: { current: "로그 폴더를 열었습니다.", previous: "" },
-    };
-  }
-
-  if (command === "check_for_updates") {
-    const currentVersion = previewUpdate.appVersion || EMPTY_STATE.appVersion;
-    previewUpdate = {
-      ...previewUpdate,
-      statusText: `최신 버전입니다. (${currentVersion})`,
-      available: false,
-      checking: false,
-      releaseUrl: "https://github.com/Lv2dev/bdo-optimizer-launcher/releases/latest",
-      latestVersion: currentVersion,
-    };
-    return {
-      status: { current: previewUpdate.statusText, previous: "" },
-      update: previewUpdate,
-    };
-  }
-
-  if (command === "check_update_alert") {
-    const currentVersion = previewUpdate.appVersion || EMPTY_STATE.appVersion;
-    previewUpdate = {
-      ...previewUpdate,
-      statusText: `최신 버전입니다. (${currentVersion})`,
-      available: false,
-      checking: false,
-      releaseUrl: "https://github.com/Lv2dev/bdo-optimizer-launcher/releases/latest",
-      latestVersion: currentVersion,
-    };
-    return {
-      status: { current: previewUpdate.statusText, previous: "" },
-      update: previewUpdate,
-      shouldAlert: false,
-      alertText: "",
-    };
-  }
-
-  if (command === "open_update_release") {
-    return {
-      status: {
-        current: args.url ? "GitHub Release 페이지를 열었습니다." : "열 수 있는 릴리스 페이지가 없습니다.",
-        previous: "",
-      },
-    };
-  }
-
-  if (command === "open_repository") {
-    return {
-      status: { current: "GitHub 저장소를 엽니다. (미리보기)", previous: "" },
-    };
-  }
-
-  if (command === "register_shutdown") {
-    const input = args.input;
-    if (input.kind === "once") {
-      previewShutdown = {
-        ...previewShutdown,
-        onceText: `${input.date} ${input.time} (미리보기)`,
-        onceActive: true,
-      };
-    } else {
-      const days = input.days
-        .map((day) => WEEKDAYS.find(([token]) => token === day)?.[1] ?? day)
-        .join("/");
-      previewShutdown = {
-        ...previewShutdown,
-        weeklyText: `매주 ${days} ${input.time} (미리보기)`,
-        weeklyActive: true,
-        weeklyDays: input.days,
-        weeklyTime: input.time,
-      };
-    }
-    return {
-      status: { current: "예약 종료가 등록되었습니다.", previous: "" },
-      shutdown: previewShutdown,
-    };
-  }
-
-  if (command === "cancel_shutdown") {
-    previewShutdown =
-      args.kind === "once"
-        ? { ...previewShutdown, onceText: "", onceActive: false }
-        : { ...previewShutdown, weeklyText: "", weeklyActive: false, weeklyDays: [], weeklyTime: null };
-    return {
-      status: { current: "예약 종료가 취소되었습니다.", previous: "" },
-      shutdown: previewShutdown,
-    };
-  }
-
-  if (command === "get_app_state") {
-    return {
-      ...EMPTY_STATE,
-      settings: previewSettings,
-      update: previewUpdate,
-      monitor: previewMonitor,
-      status: {
-        current: "브라우저 미리보기 상태입니다.",
-        previous: "",
-      },
-    };
-  }
-
-  return {
-    status: {
-      current: "브라우저 미리보기 상태입니다.",
-      previous: "",
-    },
-  };
-}
-
-function normalizePayload(command, payload) {
-  if (command === "list_schedule_rules") {
-    return { schedule: payload };
-  }
-  if (command === "get_shutdown_state") {
-    return { shutdown: payload };
-  }
-  if (command === "get_settings") {
-    return { settings: payload };
-  }
-  if (command === "get_monitor_snapshot") {
-    return payload.monitor ? payload : { monitor: payload };
-  }
-  return payload;
-}
-
 function formatError(error) {
   if (typeof error === "string") {
     return error;
@@ -626,19 +276,6 @@ function formatError(error) {
     return String(error.message);
   }
   return "명령 처리 중 오류가 발생했습니다.";
-}
-
-function mergePayload(previous, payload) {
-  return {
-    appVersion: payload.appVersion ?? previous.appVersion,
-    status: payload.status ?? previous.status,
-    control: payload.control ?? previous.control,
-    schedule: payload.schedule ?? previous.schedule,
-    shutdown: payload.shutdown ?? previous.shutdown,
-    settings: payload.settings ?? previous.settings,
-    update: payload.update ?? previous.update,
-    monitor: payload.monitor ?? previous.monitor,
-  };
 }
 
 function Help({ tip }) {
@@ -651,20 +288,48 @@ function Help({ tip }) {
 
 function GlassSelect({ value, options, onChange, width, disabled = false }) {
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef(null);
   const menuRef = useRef(null);
+  const triggerRef = useRef(null);
+  const optionRefs = useRef([]);
+  const selectId = useId();
   const [menuStyle, setMenuStyle] = useState({});
 
   const items = options.map((option) =>
     typeof option === "string" ? { value: option, label: option } : option,
   );
   const selected = items.find((item) => item.value === value) ?? items[0];
+  const selectedIndex = Math.max(0, items.findIndex((item) => item.value === selected?.value));
+
+  const closeMenu = useCallback((restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) {
+      triggerRef.current?.focus();
+    }
+  }, []);
+
+  const openMenu = useCallback(
+    (index = selectedIndex) => {
+      if (!disabled && items.length > 0) {
+        setActiveIndex(Math.max(0, Math.min(items.length - 1, index)));
+        setOpen(true);
+      }
+    },
+    [disabled, items.length, selectedIndex],
+  );
 
   useEffect(() => {
     if (disabled) {
-      setOpen(false);
+      closeMenu();
     }
-  }, [disabled]);
+  }, [closeMenu, disabled]);
+
+  useEffect(() => {
+    if (open) {
+      optionRefs.current[activeIndex]?.focus();
+    }
+  }, [activeIndex, open]);
 
   useEffect(() => {
     if (!open) {
@@ -678,10 +343,10 @@ function GlassSelect({ value, options, onChange, width, disabled = false }) {
     };
     const onKey = (event) => {
       if (event.key === "Escape") {
-        setOpen(false);
+        closeMenu(true);
       }
     };
-    const onScroll = () => setOpen(false);
+    const onScroll = () => closeMenu(Boolean(menuRef.current?.contains(document.activeElement)));
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
@@ -692,7 +357,55 @@ function GlassSelect({ value, options, onChange, width, disabled = false }) {
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onScroll);
     };
-  }, [open]);
+  }, [closeMenu, open]);
+
+  const handleTriggerKeyDown = (event) => {
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const index =
+        event.key === "ArrowUp" || event.key === "End"
+          ? items.length - 1
+          : event.key === "Home"
+            ? 0
+            : selectedIndex;
+      openMenu(index);
+    }
+  };
+
+  const handleMenuKeyDown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu(true);
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      const popup = menuRef.current;
+      const trigger = triggerRef.current;
+      closeMenu(false);
+      focusAdjacentToTrigger(trigger, popup, event.shiftKey);
+      return;
+    }
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      setActiveIndex((current) => {
+        if (event.key === "Home") return 0;
+        if (event.key === "End") return items.length - 1;
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        return (current + delta + items.length) % items.length;
+      });
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      const item = items[activeIndex];
+      if (item) {
+        onChange(item.value);
+        closeMenu(true);
+      }
+    }
+  };
 
   useLayoutEffect(() => {
     if (!open || !rootRef.current) {
@@ -710,14 +423,16 @@ function GlassSelect({ value, options, onChange, width, disabled = false }) {
     <div className="gsel" ref={rootRef} style={{ width }}>
       <button
         type="button"
+        ref={triggerRef}
         className={`field gsel-btn${open ? " open" : ""}`}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={`${selectId}-listbox`}
+        onKeyDown={handleTriggerKeyDown}
         disabled={disabled}
         onClick={() => {
-          if (!disabled) {
-            setOpen((v) => !v);
-          }
+          if (open) closeMenu();
+          else openMenu();
         }}
       >
         <span className="gsel-val">{selected?.label ?? value}</span>
@@ -725,17 +440,29 @@ function GlassSelect({ value, options, onChange, width, disabled = false }) {
       </button>
       {open
         ? createPortal(
-            <div className="gsel-menu" ref={menuRef} style={menuStyle} role="listbox">
-              {items.map((item) => (
+            <div
+              id={`${selectId}-listbox`}
+              className="gsel-menu"
+              ref={menuRef}
+              style={menuStyle}
+              role="listbox"
+              onKeyDown={handleMenuKeyDown}
+            >
+              {items.map((item, index) => (
                 <button
                   type="button"
                   key={item.value}
                   role="option"
                   aria-selected={item.value === value}
+                  tabIndex={index === activeIndex ? 0 : -1}
+                  ref={(element) => {
+                    optionRefs.current[index] = element;
+                  }}
+                  onFocus={() => setActiveIndex(index)}
                   className={`gsel-opt${item.value === value ? " on" : ""}`}
                   onClick={() => {
                     onChange(item.value);
-                    setOpen(false);
+                    closeMenu(true);
                   }}
                 >
                   <span>{item.label}</span>
@@ -752,11 +479,22 @@ function GlassSelect({ value, options, onChange, width, disabled = false }) {
 
 function GlassDatePicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
+  const [focusedDay, setFocusedDay] = useState(1);
   const rootRef = useRef(null);
   const popRef = useRef(null);
+  const triggerRef = useRef(null);
+  const dayRefs = useRef([]);
+  const calendarId = useId();
   const [menuStyle, setMenuStyle] = useState({});
   const selected = parseDateValue(value);
   const [view, setView] = useState({ year: selected.year, month: selected.month });
+
+  const closeCalendar = useCallback((restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) {
+      triggerRef.current?.focus();
+    }
+  }, []);
 
   useEffect(() => {
     if (!open) {
@@ -770,10 +508,10 @@ function GlassDatePicker({ value, onChange }) {
     };
     const onKey = (event) => {
       if (event.key === "Escape") {
-        setOpen(false);
+        closeCalendar(true);
       }
     };
-    const onScroll = () => setOpen(false);
+    const onScroll = () => closeCalendar(Boolean(popRef.current?.contains(document.activeElement)));
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
@@ -784,7 +522,13 @@ function GlassDatePicker({ value, onChange }) {
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onScroll);
     };
-  }, [open]);
+  }, [closeCalendar, open]);
+
+  useEffect(() => {
+    if (open) {
+      dayRefs.current[focusedDay]?.focus();
+    }
+  }, [focusedDay, open, view]);
 
   useLayoutEffect(() => {
     if (!open || !rootRef.current) {
@@ -796,6 +540,7 @@ function GlassDatePicker({ value, onChange }) {
 
   const openCalendar = () => {
     setView({ year: selected.year, month: selected.month });
+    setFocusedDay(selected.day);
     setOpen(true);
   };
 
@@ -810,21 +555,48 @@ function GlassDatePicker({ value, onChange }) {
     cells.push(day);
   }
 
-  const goPrev = () =>
-    setView((current) =>
-      current.month === 0
-        ? { year: current.year - 1, month: 11 }
-        : { year: current.year, month: current.month - 1 },
-    );
-  const goNext = () =>
-    setView((current) =>
-      current.month === 11
-        ? { year: current.year + 1, month: 0 }
-        : { year: current.year, month: current.month + 1 },
-    );
+  const moveMonth = (delta) => {
+    const next = new Date(view.year, view.month + delta, 1);
+    const nextDays = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
+    setView({ year: next.getFullYear(), month: next.getMonth() });
+    setFocusedDay((day) => Math.min(day, nextDays));
+  };
+  const goPrev = () => moveMonth(-1);
+  const goNext = () => moveMonth(1);
   const pick = (day) => {
     onChange(formatDateValue(view.year, view.month, day));
-    setOpen(false);
+    closeCalendar(true);
+  };
+
+  const moveDayFocus = (delta) => {
+    const next = new Date(view.year, view.month, focusedDay + delta);
+    setView({ year: next.getFullYear(), month: next.getMonth() });
+    setFocusedDay(next.getDate());
+  };
+
+  const handleDayKeyDown = (event) => {
+    const moves = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 };
+    if (moves[event.key] !== undefined) {
+      event.preventDefault();
+      moveDayFocus(moves[event.key]);
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const weekday = new Date(view.year, view.month, focusedDay).getDay();
+      moveDayFocus(event.key === "Home" ? -weekday : 6 - weekday);
+    } else if (event.key === "PageUp" || event.key === "PageDown") {
+      event.preventDefault();
+      moveMonth(event.key === "PageUp" ? -1 : 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeCalendar(true);
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      const popup = popRef.current;
+      const trigger = triggerRef.current;
+      closeCalendar(false);
+      focusAdjacentToTrigger(trigger, popup, event.shiftKey);
+    }
   };
 
   const isSelected = (day) =>
@@ -836,10 +608,12 @@ function GlassDatePicker({ value, onChange }) {
     <div className="gcal" ref={rootRef}>
       <button
         type="button"
+        ref={triggerRef}
         className={`field gcal-btn${open ? " open" : ""}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => (open ? setOpen(false) : openCalendar())}
+        aria-controls={`${calendarId}-dialog`}
+        onClick={() => (open ? closeCalendar() : openCalendar())}
       >
         <CalendarDays aria-hidden="true" />
         <span className="gcal-val">{formatDateLabel(value)}</span>
@@ -847,7 +621,14 @@ function GlassDatePicker({ value, onChange }) {
       </button>
       {open
         ? createPortal(
-            <div className="gcal-pop" ref={popRef} style={menuStyle} role="dialog" aria-label="날짜 선택">
+            <div
+              id={`${calendarId}-dialog`}
+              className="gcal-pop"
+              ref={popRef}
+              style={menuStyle}
+              role="dialog"
+              aria-label="날짜 선택"
+            >
               <div className="gcal-head">
                 <button type="button" className="gcal-nav" aria-label="이전 달" onClick={goPrev}>
                   <ChevronLeft aria-hidden="true" />
@@ -866,7 +647,7 @@ function GlassDatePicker({ value, onChange }) {
                   </span>
                 ))}
               </div>
-              <div className="gcal-grid">
+              <div className="gcal-grid" role="group" aria-label={`${view.year}년 ${view.month + 1}월`}>
                 {cells.map((day, index) =>
                   day === null ? (
                     <span key={`empty-${index}`} className="gcal-empty" />
@@ -876,6 +657,14 @@ function GlassDatePicker({ value, onChange }) {
                       key={day}
                       className={`gcal-day${isSelected(day) ? " sel" : ""}${isToday(day) ? " today" : ""}`}
                       aria-pressed={isSelected(day)}
+                      aria-label={`${view.year}년 ${view.month + 1}월 ${day}일`}
+                      aria-current={isToday(day) ? "date" : undefined}
+                      tabIndex={day === focusedDay ? 0 : -1}
+                      ref={(element) => {
+                        dayRefs.current[day] = element;
+                      }}
+                      onFocus={() => setFocusedDay(day)}
+                      onKeyDown={handleDayKeyDown}
                       onClick={() => pick(day)}
                     >
                       {day}
@@ -1112,17 +901,43 @@ function ScheduleTab({ state, pending, runCommand }) {
   const [mode, setMode] = useState("high");
   const [shutdownKind, setShutdownKind] = useState("once");
   const [shutdownDate, setShutdownDate] = useState(todayValue);
-  const [shutdownTime, setShutdownTime] = useState("23:30");
+  const [onceShutdownTime, setOnceShutdownTime] = useState("23:30");
+  const [weeklyShutdownTime, setWeeklyShutdownTime] = useState("23:30");
   const [days, setDays] = useState([currentWeekdayToken()]);
+  const lastAppliedOncePresetRef = useRef("");
   const lastAppliedWeeklyPresetRef = useRef("");
   const canRunCommand = pending === null;
+  const shutdownTime = shutdownKind === "once" ? onceShutdownTime : weeklyShutdownTime;
   const shutdownParts = parseTimeParts(shutdownTime);
   const shutdownActive = state.shutdown.onceActive || state.shutdown.weeklyActive;
-  const shutdownText = state.shutdown.weeklyActive
-    ? state.shutdown.weeklyText
-    : state.shutdown.onceActive
-      ? state.shutdown.onceText
+
+  useEffect(() => {
+    if (!state.shutdown.onceActive) {
+      lastAppliedOncePresetRef.current = "";
+      return;
+    }
+    const onceDate = /^\d{4}-\d{2}-\d{2}$/.test(state.shutdown.onceDate || "")
+      ? state.shutdown.onceDate
       : "";
+    const onceTime = /^\d{2}:\d{2}$/.test(state.shutdown.onceTime || "")
+      ? state.shutdown.onceTime
+      : "";
+    const presetKey = `${onceDate}|${onceTime}`;
+    if (!onceDate || !onceTime || lastAppliedOncePresetRef.current === presetKey) {
+      return;
+    }
+    lastAppliedOncePresetRef.current = presetKey;
+    if (!state.shutdown.weeklyActive) {
+      setShutdownKind("once");
+    }
+    setShutdownDate(onceDate);
+    setOnceShutdownTime(onceTime);
+  }, [
+    state.shutdown.onceActive,
+    state.shutdown.onceDate,
+    state.shutdown.onceTime,
+    state.shutdown.weeklyActive,
+  ]);
 
   useEffect(() => {
     if (!state.shutdown.weeklyActive) {
@@ -1141,10 +956,17 @@ function ScheduleTab({ state, pending, runCommand }) {
       return;
     }
     lastAppliedWeeklyPresetRef.current = presetKey;
-    setShutdownKind("weekly");
+    if (!state.shutdown.onceActive) {
+      setShutdownKind("weekly");
+    }
     setDays(weeklyDays);
-    setShutdownTime(weeklyTime);
-  }, [state.shutdown.weeklyActive, state.shutdown.weeklyDays, state.shutdown.weeklyTime]);
+    setWeeklyShutdownTime(weeklyTime);
+  }, [
+    state.shutdown.onceActive,
+    state.shutdown.weeklyActive,
+    state.shutdown.weeklyDays,
+    state.shutdown.weeklyTime,
+  ]);
 
   const submitSchedule = () => {
     runCommand("schedule-add", "add_schedule_rule", {
@@ -1167,7 +989,8 @@ function ScheduleTab({ state, pending, runCommand }) {
   };
 
   const stepShutdownTime = (field, delta) => {
-    setShutdownTime((current) => stepTimeValue(current, field, delta));
+    const setter = shutdownKind === "once" ? setOnceShutdownTime : setWeeklyShutdownTime;
+    setter((current) => stepTimeValue(current, field, delta));
   };
 
   const submitShutdown = () => {
@@ -1181,9 +1004,9 @@ function ScheduleTab({ state, pending, runCommand }) {
     });
   };
 
-  const cancelShutdown = () => {
+  const cancelShutdown = (kind) => {
     runCommand("shutdown-cancel", "cancel_shutdown", {
-      kind: state.shutdown.onceActive ? "once" : "weekly",
+      kind,
     });
   };
 
@@ -1197,6 +1020,7 @@ function ScheduleTab({ state, pending, runCommand }) {
           type="button"
           className={`acc-head${openAuto ? " open" : ""}`}
           aria-expanded={openAuto}
+          aria-controls="schedule-automation-panel"
           onClick={() => setOpenAuto((open) => !open)}
         >
           <Repeat aria-hidden="true" />
@@ -1207,7 +1031,12 @@ function ScheduleTab({ state, pending, runCommand }) {
           </span>
           <ChevronDown className="acc-chev" aria-hidden="true" />
         </button>
-        <div className={`acc-body${openAuto ? " open" : ""}`}>
+        <div
+          id="schedule-automation-panel"
+          className={`acc-body${openAuto ? " open" : ""}`}
+          aria-hidden={!openAuto}
+          inert={openAuto ? undefined : ""}
+        >
           <div className="acc-inner">
             <div style={{ paddingTop: 14 }}>
               <p className="panel-sub" style={{ marginBottom: 14 }}>
@@ -1316,6 +1145,7 @@ function ScheduleTab({ state, pending, runCommand }) {
           type="button"
           className={`acc-head${openRes ? " open" : ""}`}
           aria-expanded={openRes}
+          aria-controls="shutdown-schedule-panel"
           onClick={() => setOpenRes((open) => !open)}
         >
           <Power aria-hidden="true" />
@@ -1326,18 +1156,29 @@ function ScheduleTab({ state, pending, runCommand }) {
           </span>
           <ChevronDown className="acc-chev" aria-hidden="true" />
         </button>
-        <div className={`acc-body${openRes ? " open" : ""}`}>
+        <div
+          id="shutdown-schedule-panel"
+          className={`acc-body${openRes ? " open" : ""}`}
+          aria-hidden={!openRes}
+          inert={openRes ? undefined : ""}
+        >
           <div className="acc-inner">
             <div style={{ paddingTop: 14 }}>
-              {shutdownActive ? (
-                <p className="panel-sub" style={{ color: "var(--warn)", marginBottom: 14 }}>
-                  ● {shutdownText}
+              {state.shutdown.onceActive ? (
+                <p className="panel-sub" style={{ color: "var(--warn)", marginBottom: 8 }}>
+                  ● 단발: {state.shutdown.onceText}
                 </p>
-              ) : (
+              ) : null}
+              {state.shutdown.weeklyActive ? (
+                <p className="panel-sub" style={{ color: "var(--warn)", marginBottom: 14 }}>
+                  ● 매주: {state.shutdown.weeklyText}
+                </p>
+              ) : null}
+              {!shutdownActive ? (
                 <p className="panel-sub" style={{ marginBottom: 14 }}>
                   지정한 시간에 PC를 자동으로 종료합니다.
                 </p>
-              )}
+              ) : null}
 
               <PillSwitch
                 value={shutdownKind}
@@ -1400,9 +1241,16 @@ function ScheduleTab({ state, pending, runCommand }) {
                 <button type="button" className="btn btn-primary" disabled={!canRunCommand} onClick={submitShutdown}>
                   <Check aria-hidden="true" /> 예약 등록
                 </button>
-                <button type="button" className="btn" disabled={!canRunCommand || !shutdownActive} onClick={cancelShutdown}>
-                  예약 취소
-                </button>
+                {state.shutdown.onceActive ? (
+                  <button type="button" className="btn" disabled={!canRunCommand} onClick={() => cancelShutdown("once")}>
+                    단발 취소
+                  </button>
+                ) : null}
+                {state.shutdown.weeklyActive ? (
+                  <button type="button" className="btn" disabled={!canRunCommand} onClick={() => cancelShutdown("weekly")}>
+                    매주 취소
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1644,11 +1492,10 @@ function MonitorTab({ state }) {
   );
 }
 
-function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }) {
+function SettingsTab({ state, pending, runCommand, showToast }) {
   const settings = state.settings;
   const update = state.update;
   const canRunCommand = pending === null;
-  const accArr = Array.isArray(accent) ? accent : [accent];
 
   const setSetting = (key, values) => {
     runCommand(`setting-${key}`, "set_setting", {
@@ -1721,7 +1568,6 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
                 disabled={!canRunCommand}
                 title={ACCENT_NAMES[index]}
                 onClick={() => {
-                  onAccent(palette);
                   setSetting("accent_palette", { intValue: index });
                 }}
               >
@@ -1853,6 +1699,7 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
           <GlassSelect
             value={settings.defaultMode ?? "none"}
             width={120}
+            disabled={!canRunCommand}
             options={[
               { value: "none", label: "없음" },
               { value: "high", label: "고성능" },
@@ -1872,6 +1719,7 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
           <GlassSelect
             value={String(settings.monitorIntervalMs ?? 1000)}
             width={110}
+            disabled={!canRunCommand}
             options={[
               { value: "500", label: "0.5초" },
               { value: "1000", label: "1초" },
@@ -2001,8 +1849,13 @@ function SettingsTab({ state, pending, runCommand, accent, onAccent, showToast }
   );
 }
 
-function App() {
-  const [state, setState] = useState(EMPTY_STATE);
+function App({
+  nativeInvoke = invoke,
+  runtimeCheck = isTauriRuntime,
+  previewInvoke = browserPreviewPayload,
+  initialState = EMPTY_STATE,
+}) {
+  const [state, setState] = useState(initialState);
   const [launcherPath, setLauncherPath] = useState("");
   const [pending, setPending] = useState(null);
   const [activeTab, setActiveTab] = useState(0);
@@ -2010,9 +1863,39 @@ function App() {
   const [toast, setToast] = useState({ show: false, message: "" });
   const toastTimer = useRef(null);
   const monitorPollInFlight = useRef(false);
+  const scheduleReloadInFlight = useRef(false);
   const pendingRef = useRef(null);
+  const pendingDomainRef = useRef(null);
+  const domainGenerationRef = useRef({
+    control: 0,
+    schedule: 0,
+    shutdown: 0,
+    settings: 0,
+    update: 0,
+    monitor: 0,
+  });
   const tabRefs = useRef([]);
   const [pill, setPill] = useState({ left: 0, width: 0 });
+
+  const activateTab = useCallback((index, focus = false) => {
+    const next = Math.max(0, Math.min(TABS.length - 1, index));
+    setActiveTab(next);
+    if (focus) {
+      tabRefs.current[next]?.focus();
+    }
+  }, []);
+
+  const handleTabKeyDown = (event, index) => {
+    let next = null;
+    if (event.key === "ArrowRight") next = (index + 1) % TABS.length;
+    if (event.key === "ArrowLeft") next = (index - 1 + TABS.length) % TABS.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = TABS.length - 1;
+    if (next !== null) {
+      event.preventDefault();
+      activateTab(next, true);
+    }
+  };
 
   const showToast = useCallback((message) => {
     setToast({ show: true, message });
@@ -2040,16 +1923,31 @@ function App() {
 
   const runCommand = useCallback(
     async (name, command, args, shouldToast = true, trackPending = true) => {
+      const domain = COMMAND_DOMAINS[command] ?? null;
+      if (trackPending && pendingRef.current !== null) {
+        return;
+      }
+      if (!trackPending && domain && pendingDomainRef.current === domain) {
+        return;
+      }
+      const generation = domain ? ++domainGenerationRef.current[domain] : null;
+      const isCurrent = () => !domain || domainGenerationRef.current[domain] === generation;
       if (trackPending) {
         pendingRef.current = name;
+        pendingDomainRef.current = domain;
         setPending(name);
       }
       try {
-        const rawPayload = isTauriRuntime()
-          ? await invoke(command, args)
-          : browserPreviewPayload(command, args ?? {});
-        applyPayload(normalizePayload(command, rawPayload), shouldToast);
+        const rawPayload = runtimeCheck()
+          ? await nativeInvoke(command, args)
+          : previewInvoke(command, args ?? {});
+        if (isCurrent()) {
+          applyPayload(normalizePayload(command, rawPayload), shouldToast);
+        }
       } catch (error) {
+        if (!isCurrent()) {
+          return;
+        }
         const message = formatError(error);
         setState((current) => ({
           ...current,
@@ -2064,21 +1962,29 @@ function App() {
       } finally {
         if (trackPending) {
           pendingRef.current = null;
+          if (pendingDomainRef.current === domain) {
+            pendingDomainRef.current = null;
+          }
           setPending(null);
         }
       }
     },
-    [applyPayload, showToast],
+    [applyPayload, nativeInvoke, previewInvoke, runtimeCheck, showToast],
   );
 
   const pollUpdateAlert = useCallback(async () => {
     if (!state.settings.updateAlertEnabled || pendingRef.current !== null) {
       return;
     }
+    const generation = ++domainGenerationRef.current.update;
+    const isCurrent = () => domainGenerationRef.current.update === generation;
     try {
-      const rawPayload = isTauriRuntime()
-        ? await invoke("check_update_alert")
-        : browserPreviewPayload("check_update_alert", {});
+      const rawPayload = runtimeCheck()
+        ? await nativeInvoke("check_update_alert")
+        : previewInvoke("check_update_alert", {});
+      if (!isCurrent()) {
+        return;
+      }
       applyPayload(normalizePayload("check_update_alert", rawPayload), false);
       if (rawPayload.shouldAlert && rawPayload.alertText) {
         showToast(rawPayload.alertText);
@@ -2086,11 +1992,19 @@ function App() {
     } catch (_) {
       // 백그라운드 업데이트 확인 실패는 수동 확인 버튼의 명시 오류 흐름에 맡긴다.
     }
-  }, [applyPayload, showToast, state.settings.updateAlertEnabled]);
+  }, [applyPayload, nativeInvoke, previewInvoke, runtimeCheck, showToast, state.settings.updateAlertEnabled]);
 
   const reloadSchedule = useCallback(async () => {
-    await runCommand("schedule-load", "list_schedule_rules", undefined, false);
-    await runCommand("shutdown-load", "get_shutdown_state", undefined, false);
+    if (scheduleReloadInFlight.current) {
+      return;
+    }
+    scheduleReloadInFlight.current = true;
+    try {
+      await runCommand("schedule-load", "list_schedule_rules", undefined, false, false);
+      await runCommand("shutdown-load", "get_shutdown_state", undefined, false, false);
+    } finally {
+      scheduleReloadInFlight.current = false;
+    }
   }, [runCommand]);
 
   const recalcTabPill = useCallback(() => {
@@ -2124,7 +2038,8 @@ function App() {
 
   useEffect(() => {
     runCommand("init", "get_app_state", undefined, false);
-  }, [runCommand]);
+    reloadSchedule();
+  }, [reloadSchedule, runCommand]);
 
   useEffect(() => {
     if (!state.settings.updateAlertEnabled) {
@@ -2154,6 +2069,23 @@ function App() {
   }, [recalcTabPill]);
 
   useEffect(() => {
+    const handleShortcut = (event) => {
+      if (
+        event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !event.metaKey &&
+        /^[1-4]$/.test(event.key)
+      ) {
+        event.preventDefault();
+        activateTab(Number(event.key) - 1, true);
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [activateTab]);
+
+  useEffect(() => {
     const onResize = () => recalcTabPill();
     const timer = window.setTimeout(recalcTabPill, 60);
     window.addEventListener("resize", onResize);
@@ -2168,9 +2100,17 @@ function App() {
       reloadSchedule();
     }
     if (activeTab === 3) {
-      runCommand("settings-load", "get_settings", undefined, false);
+      runCommand("settings-load", "get_settings", undefined, false, false);
     }
   }, [activeTab, reloadSchedule, runCommand]);
+
+  useEffect(() => {
+    if (activeTab !== 1) {
+      return undefined;
+    }
+    const timer = window.setInterval(reloadSchedule, 15000);
+    return () => window.clearInterval(timer);
+  }, [activeTab, reloadSchedule]);
 
   useEffect(() => {
     if (activeTab !== 2) {
@@ -2195,12 +2135,13 @@ function App() {
     const timer = window.setInterval(pollMonitor, intervalMs);
     return () => {
       window.clearInterval(timer);
+      domainGenerationRef.current.monitor += 1;
       // 모니터 탭을 벗어나면 백엔드 ETW FPS 세션을 능동적으로 중단한다.
-      if (isTauriRuntime()) {
-        invoke("stop_monitor_session").catch(() => {});
+      if (runtimeCheck()) {
+        nativeInvoke("stop_monitor_session").catch(() => {});
       }
     };
-  }, [activeTab, runCommand, state.settings.monitorIntervalMs]);
+  }, [activeTab, nativeInvoke, runCommand, runtimeCheck, state.settings.monitorIntervalMs]);
 
   // 5초 자동 게임상태 갱신. pending을 ref로 읽어 인터벌이 명령마다 재생성되지 않게 한다.
   // (의존성에 pending을 넣으면 명령 호출 때마다 null→name→null 변화로 타이머가 리셋되어
@@ -2250,12 +2191,16 @@ function App() {
                 key={tab.label}
                 role="tab"
                 aria-selected={index === activeTab}
+                aria-controls="app-tabpanel"
+                id={`app-tab-${index}`}
+                tabIndex={index === activeTab ? 0 : -1}
                 ref={(element) => {
                   tabRefs.current[index] = element;
                 }}
                 className={`tab${index === activeTab ? " active" : ""}`}
                 disabled={!tab.enabled}
-                onClick={() => setActiveTab(index)}
+                onClick={() => activateTab(index)}
+                onKeyDown={(event) => handleTabKeyDown(event, index)}
               >
                 <Icon aria-hidden="true" />
                 {tab.label}
@@ -2264,7 +2209,15 @@ function App() {
           })}
         </nav>
 
-        <div className="content" key={activeTab} role="tabpanel">
+        <div
+          className="content"
+          aria-busy={pending !== null}
+          key={activeTab}
+          role="tabpanel"
+          id="app-tabpanel"
+          aria-labelledby={`app-tab-${activeTab}`}
+          tabIndex={0}
+        >
           {activeTab === 0 ? (
             <ControlTab
               state={state}
@@ -2286,20 +2239,31 @@ function App() {
               state={state}
               pending={pending}
               runCommand={runCommand}
-              accent={accent}
-              onAccent={setAccent}
               showToast={showToast}
             />
           )}
         </div>
 
-        <footer className="statusbar">
+        <footer
+          className="statusbar"
+          role={pending ? "status" : undefined}
+          aria-live={pending ? "polite" : undefined}
+          aria-atomic={pending ? "true" : undefined}
+        >
           <span className={`status-led${state.control.gameRunning ? " on" : ""}`} />
-          <span>{state.status.current}</span>
+          {pending ? <RefreshCw className="pending-spinner" aria-hidden="true" /> : null}
+          <span className="status-message">
+            {pending ? pendingMessage(pending) : state.status.current}
+          </span>
           <span className="status-side">{state.control.gameRunning ? "게임 실행 중" : "대기 중"}</span>
         </footer>
 
-        <div className={`toast${toast.show ? " show" : ""}`} role="status" aria-live="polite">
+        <div
+          className={`toast${toast.show ? " show" : ""}`}
+          role={toast.show ? "status" : undefined}
+          aria-live={toast.show ? "polite" : undefined}
+          aria-hidden={!toast.show}
+        >
           <span className="status-led on" />
           {toast.message}
         </div>
@@ -2309,7 +2273,11 @@ function App() {
 }
 
 const rootElement = document.getElementById("root");
-syncRuntimeBodyMarkers();
-const root = window.__BDO_OPTIMIZER_ROOT__ ?? createRoot(rootElement);
-window.__BDO_OPTIMIZER_ROOT__ = root;
-root.render(<App />);
+if (rootElement) {
+  syncRuntimeBodyMarkers();
+  const root = window.__BDO_OPTIMIZER_ROOT__ ?? createRoot(rootElement);
+  window.__BDO_OPTIMIZER_ROOT__ = root;
+  root.render(<App />);
+}
+
+export { App, EMPTY_STATE, GlassDatePicker, GlassSelect, ScheduleTab, SettingsTab };
