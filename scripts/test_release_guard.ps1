@@ -101,6 +101,8 @@ try {
     Assert-MutationRejected "package.json" '"tauri:build":\s*"tauri build"' '"tauri:build": "cargo build --release"'
     Assert-MutationRejected ".gitattributes" '(?m)^docs/distribution/manual\.html text eol=lf\r?$' 'docs/distribution/manual.html text eol=crlf'
     Assert-MutationRejected ".gitattributes" '(?m)^docs/distribution/manual\.html text eol=lf\r?$' "docs/distribution/manual.html text eol=lf`r`ndocs/distribution/manual.html text eol=crlf"
+    Assert-MutationRejected ".gitattributes" '(?m)^windows/hooks\.nsh text eol=lf\r?$' 'windows/hooks.nsh text eol=crlf'
+    Assert-MutationRejected ".gitattributes" '(?m)^windows/installer\.nsi text eol=lf\r?$' 'windows/installer.nsi text eol=crlf'
     Assert-MutationRejected "package.json" '"@tauri-apps/cli":\s*"2\.11\.2"' '"@tauri-apps/cli": "^2.0.0"'
     Assert-MutationRejected "tauri.conf.json" ('"version":\s*"' + [regex]::Escape([string]$package.version) + '"') '"version": "9.9.9"'
     Assert-MutationRejected "tauri.conf.json" '"template":\s*"\./windows/installer\.nsi"' '"template": "./windows/other.nsi"'

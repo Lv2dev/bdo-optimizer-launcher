@@ -60,8 +60,13 @@ $installerAclGuard = Read-RootFile "scripts\installer_acl_guard.ps1"
 Assert-CommonControlsV6 $manifest "app.manifest"
 Assert-CommonControlsV6 $devManifest "app.dev.manifest"
 $normalizedGitAttributes = $gitAttributes.Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd([char[]]"`n")
-if ($normalizedGitAttributes -cne "docs/distribution/manual.html text eol=lf") {
-    throw "manual.html must have one deterministic LF line-ending attribute"
+$expectedGitAttributes = @(
+    "docs/distribution/manual.html text eol=lf"
+    "windows/hooks.nsh text eol=lf"
+    "windows/installer.nsi text eol=lf"
+) -join "`n"
+if ($normalizedGitAttributes -cne $expectedGitAttributes) {
+    throw "Whole-file SHA inputs must have exact deterministic LF attributes"
 }
 function Assert-ExecutionLevel([string]$text, [string]$expected, [string]$name) {
     [xml]$xml = $text
