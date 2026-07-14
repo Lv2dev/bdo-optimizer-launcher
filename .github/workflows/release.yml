@@ -138,6 +138,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
 
+      - name: Install ripgrep
+        run: cargo install ripgrep --version 15.1.0 --locked
+
       - name: Cargo audit
         run: cargo audit
 
