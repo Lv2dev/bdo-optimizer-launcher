@@ -133,7 +133,6 @@ try {
     }
     if (Test-Path -LiteralPath $installedExe) { throw "Uninstall left installed executable" }
     if (Test-Path -LiteralPath $uninstallKey) { throw "Uninstall left registry entry" }
-    Write-Host "installer install/upgrade/uninstall smoke test passed"
 } finally {
     if (Test-Path -LiteralPath $reparsePath) {
         Remove-Item -LiteralPath $reparsePath -Force
@@ -149,3 +148,5 @@ try {
         & $schtasks /Delete /TN $name /F *> $null
     }
 }
+Write-Host "installer install/upgrade/uninstall smoke test passed"
+$global:LASTEXITCODE = 0

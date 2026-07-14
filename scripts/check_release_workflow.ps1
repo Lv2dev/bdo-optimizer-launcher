@@ -214,6 +214,10 @@ Assert-Match $installerSmoke 'First install unexpectedly created task' "Installe
 Assert-Match $installerSmoke 'Untrusted existing uninstaller was executed' "Installer smoke must prove upgrades do not execute the previous UninstallString"
 Assert-Match $installerSmoke 'already-absent uninstall task case' "Installer smoke must verify that an already-absent task is accepted"
 Assert-Match $installerSmoke 'Uninstall left orphan task' "Installer smoke must reject orphan tasks after uninstall"
+Assert-Match $installerSmoke '(?ms)\}\s*finally\s*\{.*?\}\s*Write-Host "installer install/upgrade/uninstall smoke test passed"\s*\r?\n\$global:LASTEXITCODE = 0\s*$' "Installer smoke must report success and normalize the native exit code only after cleanup"
+if ([regex]::Matches($installerSmoke, '(?m)^\$global:LASTEXITCODE = 0\s*$').Count -ne 1) {
+    throw "Installer smoke must normalize the native exit code exactly once"
+}
 
 Assert-Match $release '(?m)^permissions:\s*\r?\n\s+contents:\s+read' "release default permissions must be contents: read"
 Assert-Match $release '(?m)^on:\s*\r?\n\s+workflow_dispatch:' "release workflow must run only from workflow_dispatch"
@@ -253,6 +257,10 @@ Assert-Match $release 'bdo-optimizer-launcher-setup\.exe' "release assets must u
 Assert-Match $release 'check_tauri_embed\.ps1' "release workflow must verify embedded production assets"
 Assert-Match $release 'check_tauri_embed\.ps1[^\r\n]+-ExpectedVersion\s+\$version[^\r\n]+-ExpectedExecutionLevel\s+requireAdministrator' "release embed check must verify version and elevation"
 Assert-Match $release 'smoke_test_installer\.ps1' "release workflow must smoke test installer lifecycle"
+Assert-Match $release 'smoke_test_installer\.ps1[^\r\n]*\r?\n\s*\$global:LASTEXITCODE = 0' "release workflow must normalize a successful legacy smoke script native exit code"
+if ([regex]::Matches($release, '(?m)^\s+\$global:LASTEXITCODE = 0\s*$').Count -ne 1) {
+    throw "release workflow must normalize the legacy smoke exit code exactly once"
+}
 Assert-Match $release '(?ms)^  build:.*?cargo install cargo-audit --version 0\.22\.2 --locked.*?run:\s*cargo audit\s*$.*?npm run tauri:build' "release build must run pinned cargo-audit before packaging"
 if ([regex]::Matches($release, '(?m)^\s+run:\s+cargo install cargo-audit --version 0\.22\.2 --locked\s*$').Count -ne 1) {
     throw "release workflow must install pinned cargo-audit exactly once"

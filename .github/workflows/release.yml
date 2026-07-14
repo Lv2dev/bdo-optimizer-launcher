@@ -176,6 +176,7 @@ jobs:
         run: |
           $version = $env:RELEASE_TAG.Substring(1)
           ./scripts/smoke_test_installer.ps1 -Installer target/release/bdo-optimizer-launcher-setup.exe -ExpectedVersion $version -AllowSystemChanges
+          $global:LASTEXITCODE = 0
 
       - name: Compute installer SHA-256
         shell: pwsh

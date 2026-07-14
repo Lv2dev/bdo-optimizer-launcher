@@ -132,12 +132,14 @@ try {
     Assert-MutationRejected "windows\hooks.nsh" '\$WINDIR\\System32\\Tasks\\\$\{TASK_NAME\}' '$WINDIR\System32\Missing\${TASK_NAME}'
     Assert-MutationRejected "windows\hooks.nsh" '\$\{DisableX64FSRedirection\}' '${EnableX64FSRedirection}'
     Assert-MutationRejected "scripts\installer_acl_guard.ps1" 'RawSecurityDescriptor' 'CommonSecurityDescriptor'
+    Assert-MutationRejected "scripts\smoke_test_installer.ps1" '(?m)^\$global:LASTEXITCODE = 0\s*$' '$global:LASTEXITCODE = 1'
     Assert-MutationRejected ".github\workflows\release.yml" 'cargo-audit --version 0\.22\.2 --locked' 'cargo-audit --version 0.22.1 --locked'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo audit\s*$' '$1run: cargo test'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo install ripgrep --version 15\.1\.0 --locked\s*$' '$1run: cargo --version'
     Assert-MutationRejected ".github\workflows\release.yml" 'ripgrep --version 15\.1\.0 --locked' 'ripgrep --version 15.0.0 --locked'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo install ripgrep --version 15\.1\.0 --locked\s*$' ('${1}run: cargo install ripgrep --version 15.1.0 --locked' + "`r`n" + '${1}run: cargo install ripgrep --version 15.1.0 --locked')
     Assert-RipgrepInstallAfterEmbedRejected
+    Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)\$global:LASTEXITCODE = 0\s*$' '$1$global:LASTEXITCODE = 1'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^  workflow_dispatch:' '  push:'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s+)actions:\s+read\s*$' '$1actions: none'
     Assert-MutationRejected ".github\workflows\release.yml" '\$env:WORKFLOW_REF -cne "refs/heads/\$env:DEFAULT_BRANCH"' '$env:WORKFLOW_REF -ceq "refs/heads/$env:DEFAULT_BRANCH"'
