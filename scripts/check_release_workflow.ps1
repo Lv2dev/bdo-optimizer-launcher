@@ -260,6 +260,10 @@ if ([regex]::Matches($release, '(?m)^\s+run:\s+cargo install cargo-audit --versi
 if ([regex]::Matches($release, '(?m)^\s+run:\s+cargo audit\s*$').Count -ne 1) {
     throw "release workflow must run cargo audit exactly once"
 }
+Assert-Match $release '(?ms)^  build:.*?run:\s*cargo install ripgrep --version 15\.1\.0 --locked\s*$.*?check_tauri_embed\.ps1' "release build must install pinned ripgrep before the production embed check"
+if ([regex]::Matches($release, '(?m)^\s+run:\s+cargo install ripgrep --version 15\.1\.0 --locked\s*$').Count -ne 1) {
+    throw "release workflow must install pinned ripgrep exactly once"
+}
 Assert-Match $release 'Verify downloaded release asset hashes' "publish job must reverify downloaded asset hashes"
 if ($release -match '(?m)run:\s*cargo build --release') { throw "bare cargo release build is forbidden" }
 

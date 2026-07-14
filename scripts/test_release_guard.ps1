@@ -93,6 +93,22 @@ function Assert-BinaryMutationRejected([string]$relative) {
     if ((Invoke-Guard) -eq 0) { throw "Release guard accepted stale manual input: $relative" }
 }
 
+function Assert-RipgrepInstallAfterEmbedRejected {
+    Copy-Fixture
+    $path = Join-Path $fixture ".github\workflows\release.yml"
+    $text = Get-Content -LiteralPath $path -Raw
+    $installPattern = '(?ms)^\s{6}- name: Install ripgrep\r?\n\s{8}run: cargo install ripgrep --version 15\.1\.0 --locked\r?\n'
+    $installMatch = [regex]::Match($text, $installPattern)
+    if (-not $installMatch.Success) { throw "Ripgrep install step was not found in fixture" }
+    $withoutInstall = $text.Remove($installMatch.Index, $installMatch.Length)
+    $smokeStep = [regex]::Match($withoutInstall, '(?m)^\s{6}- name: Smoke test install, upgrade, and uninstall cleanup\s*$')
+    if (-not $smokeStep.Success) { throw "Installer smoke step was not found in fixture" }
+    $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $changed = $withoutInstall.Insert($smokeStep.Index, $installMatch.Value + $newline)
+    [System.IO.File]::WriteAllText($path, $changed, [System.Text.UTF8Encoding]::new($false))
+    if ((Invoke-Guard) -eq 0) { throw "Release guard accepted ripgrep installation after the embed check" }
+}
+
 try {
     Copy-Fixture
     if ((Invoke-Guard) -ne 0) { throw "Valid release fixture was rejected" }
@@ -118,6 +134,10 @@ try {
     Assert-MutationRejected "scripts\installer_acl_guard.ps1" 'RawSecurityDescriptor' 'CommonSecurityDescriptor'
     Assert-MutationRejected ".github\workflows\release.yml" 'cargo-audit --version 0\.22\.2 --locked' 'cargo-audit --version 0.22.1 --locked'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo audit\s*$' '$1run: cargo test'
+    Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo install ripgrep --version 15\.1\.0 --locked\s*$' '$1run: cargo --version'
+    Assert-MutationRejected ".github\workflows\release.yml" 'ripgrep --version 15\.1\.0 --locked' 'ripgrep --version 15.0.0 --locked'
+    Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo install ripgrep --version 15\.1\.0 --locked\s*$' ('${1}run: cargo install ripgrep --version 15.1.0 --locked' + "`r`n" + '${1}run: cargo install ripgrep --version 15.1.0 --locked')
+    Assert-RipgrepInstallAfterEmbedRejected
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^  workflow_dispatch:' '  push:'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s+)actions:\s+read\s*$' '$1actions: none'
     Assert-MutationRejected ".github\workflows\release.yml" '\$env:WORKFLOW_REF -cne "refs/heads/\$env:DEFAULT_BRANCH"' '$env:WORKFLOW_REF -ceq "refs/heads/$env:DEFAULT_BRANCH"'
