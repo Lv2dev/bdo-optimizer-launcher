@@ -78,6 +78,18 @@ const checks = [
     pass: !css.includes("max-width: 760px") && css.includes("max-width: 640px"),
   },
   {
+    name: "scroll content reserves symmetric gutters around the vertical scrollbar",
+    pass: css.includes("scrollbar-gutter: stable both-edges;"),
+  },
+  {
+    name: "monitor graph scrolls its data group left without morphing path coordinates",
+    pass: css.includes("@keyframes graphScrollLeft")
+      && css.includes("transform-box: view-box;")
+      && css.includes("transform: translateX(var(--graph-shift));")
+      && css.includes("animation: graphScrollLeft var(--graph-duration) linear both;")
+      && !/\.graph-svg path,\s*\.graph-svg circle\s*\{[^}]*transition:\s*d/.test(css),
+  },
+  {
     name: "css restores keyboard focus visibility on custom controls",
     pass: css.includes(":focus-visible") && /\.field:focus-visible/.test(css),
   },

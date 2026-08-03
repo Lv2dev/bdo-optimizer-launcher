@@ -1,10 +1,11 @@
-// Windows 시작 시 자동 실행. schtasks 로그온 트리거 작업으로 UAC 프롬프트 없이 elevated 실행.
+// Windows 시작 시 자동 실행. Task Scheduler 로그온 트리거로 UAC 프롬프트 없이 elevated 실행.
 // 작업 이름은 종료 예약(BDO_Auto_Shutdown_*)과 prefix 분리.
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL};
+use std::sync::Mutex;
+use windows::core::{BSTR, PCWSTR, VARIANT};
+use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL, RPC_E_CHANGED_MODE};
 use windows::Win32::Security::Authorization::{
     ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
 };
@@ -19,11 +20,22 @@ use windows::Win32::Storage::FileSystem::{
     FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
     WRITE_DAC, WRITE_OWNER,
 };
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_MULTITHREADED,
+};
+use windows::Win32::System::TaskScheduler::{
+    ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_LOGON_INTERACTIVE_TOKEN,
+};
 use windows::Win32::UI::Shell::{FOLDERID_ProgramFiles, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG};
 
 const TASK_NAME: &str = "BDO_Optimizer_Launcher_Autostart";
 const MINIMIZED_FLAG: &str = "--minimized";
+const LOGON_DELAY: &str = "PT30S";
+const EXECUTION_TIME_LIMIT: &str = "PT0S";
+const RESTART_INTERVAL: &str = "PT1M";
+const RESTART_COUNT: &str = "3";
+static AUTOSTART_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
 // M66a: thiserror enum. 호출처는 Display로 동일 메시지 유지.
 #[derive(thiserror::Error, Debug)]
@@ -149,6 +161,7 @@ fn unregister_with(
 
 // M76: deny-list 헬퍼는 backend/mod.rs로 승격되어 launcher와 공유한다.
 // 본 모듈은 autostart 컨텍스트 메시지(`Error::UntrustedAutostartPath`)로 변환만 담당.
+#[cfg(test)]
 fn validate_autostart_exe_path_for_roots(
     exe: &Path,
     high_risk_roots: &[PathBuf],
@@ -397,6 +410,7 @@ fn validate_protected_autostart_path(exe: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(test)]
 fn build_tr_value_for_exe(
     exe: &Path,
     with_tray: bool,
@@ -414,37 +428,123 @@ fn build_tr_value_for_exe(
     }
 }
 
-// 현재 실행 파일의 절대경로를 schtasks /tr 인자 형식으로 만든다.
-// 공백 포함 경로 안전성을 위해 큰따옴표로 감싸고, with_tray가 true면 --minimized를 덧붙인다.
-// 경로에 `"`가 포함되면 schtasks 내부 재파싱에서 인자 경계가 깨지므로 reject (NTFS에서 `"`는
-// 금지 문자지만 symlink/hardlink 경유 비정상 입력 방어).
-fn build_tr_value(with_tray: bool) -> Result<String, Error> {
+fn validated_current_exe() -> Result<PathBuf, Error> {
     let exe = std::env::current_exe().map_err(Error::CurrentExe)?;
     validate_protected_autostart_path(&exe)?;
-    build_tr_value_for_exe(&exe, with_tray, &[])
+    if exe.to_string_lossy().contains('"') {
+        return Err(Error::QuoteInPath);
+    }
+    Ok(exe)
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn build_task_xml(exe: &Path, with_tray: bool) -> String {
+    let arguments = if with_tray {
+        format!("<Arguments>{MINIMIZED_FLAG}</Arguments>")
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>BDO Optimizer 자동 시작</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><Delay>{LOGON_DELAY}</Delay></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <Enabled>true</Enabled>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>{EXECUTION_TIME_LIMIT}</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>{RESTART_INTERVAL}</Interval><Count>{RESTART_COUNT}</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>{}</Command>{arguments}</Exec></Actions>
+</Task>"#,
+        xml_escape(&exe.to_string_lossy())
+    )
+}
+
+struct ComInitialization(bool);
+
+impl ComInitialization {
+    fn initialize() -> Result<Self, Error> {
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result.is_ok() {
+            Ok(Self(true))
+        } else if result == RPC_E_CHANGED_MODE {
+            // Tauri가 다른 apartment 모델로 이미 초기화한 스레드에서도 기존 COM을 그대로 사용한다.
+            Ok(Self(false))
+        } else {
+            Err(Error::RegisterFailed(format!(
+                "COM 초기화 실패: {result:?}"
+            )))
+        }
+    }
+}
+
+impl Drop for ComInitialization {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+fn register_task_xml_named(task_name: &str, xml: &str) -> Result<(), Error> {
+    let _com = ComInitialization::initialize()?;
+    let result = unsafe {
+        (|| -> windows::core::Result<()> {
+            let service: ITaskService =
+                CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)?;
+            let empty = VARIANT::default();
+            service.Connect(&empty, &empty, &empty, &empty)?;
+            let folder = service.GetFolder(&BSTR::from("\\"))?;
+            let user = VARIANT::from(service.ConnectedUser()?);
+            folder.RegisterTask(
+                &BSTR::from(task_name),
+                &BSTR::from(xml),
+                TASK_CREATE_OR_UPDATE.0,
+                &user,
+                &empty,
+                TASK_LOGON_INTERACTIVE_TOKEN,
+                &empty,
+            )?;
+            Ok(())
+        })()
+    };
+    result.map_err(|error| Error::RegisterFailed(error.to_string()))
+}
+
+fn with_operation_lock<T>(lock: &Mutex<()>, operation: impl FnOnce() -> T) -> T {
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation()
+}
+
+fn with_autostart_operation<T>(operation: impl FnOnce() -> T) -> T {
+    with_operation_lock(&AUTOSTART_OPERATION_LOCK, operation)
+}
+
+fn register_autostart_unlocked(with_tray: bool) -> Result<(), Error> {
+    let exe = validated_current_exe()?;
+    register_task_xml_named(TASK_NAME, &build_task_xml(&exe, with_tray))?;
+
+    verify_registration_with(with_tray, query_autostart, delete_registered_task)
 }
 
 pub fn register_autostart(with_tray: bool) -> Result<(), Error> {
-    let tr = build_tr_value(with_tray)?;
-    let out = schtasks_cmd()
-        .args([
-            "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "onlogon", "/rl", "HIGHEST", "/f",
-        ])
-        .output()?;
-
-    if out.status.success() {
-        return verify_registration_with(with_tray, query_autostart, delete_registered_task);
-    }
-    let detail = {
-        let o = String::from_utf8_lossy(&out.stdout);
-        let e = String::from_utf8_lossy(&out.stderr);
-        format!("{}{}", o.trim(), e.trim())
-    };
-    Err(Error::RegisterFailed(detail))
+    with_autostart_operation(|| register_autostart_unlocked(with_tray))
 }
 
 pub fn unregister_autostart() -> Result<(), Error> {
-    unregister_with(task_exists, delete_registered_task)
+    with_autostart_operation(|| unregister_with(task_exists, delete_registered_task))
 }
 
 fn delete_registered_task() -> Result<(), Error> {
@@ -567,8 +667,58 @@ fn normalize_task_command(command: &str) -> Option<String> {
     (!normalized.is_empty() && !normalized.contains('"')).then(|| normalized.to_string())
 }
 
-fn parse_task_action(xml: &str) -> Option<(String, String)> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeContract {
+    Current,
+    LegacyResilience,
+}
+
+fn runtime_contract(logon_trigger: &str, settings: &str) -> Option<RuntimeContract> {
+    let delay = xml_tag(logon_trigger, "Delay");
+    let execution_limit = xml_tag(settings, "ExecutionTimeLimit");
+    let restart = xml_element(settings, "RestartOnFailure");
+    let instance_policy = xml_tag(settings, "MultipleInstancesPolicy");
+    let disallow_on_battery = xml_tag(settings, "DisallowStartIfOnBatteries");
+    let stop_on_battery = xml_tag(settings, "StopIfGoingOnBatteries");
+    let timing_is_current = delay.as_deref() == Some(LOGON_DELAY)
+        && execution_limit.as_deref() == Some(EXECUTION_TIME_LIMIT)
+        && restart.is_some_and(|value| {
+            xml_tag(value, "Interval").as_deref() == Some(RESTART_INTERVAL)
+                && xml_tag(value, "Count").as_deref() == Some(RESTART_COUNT)
+        });
+    let battery_is_current = disallow_on_battery.as_deref() == Some("false")
+        && stop_on_battery.as_deref() == Some("false");
+    let instance_policy_is_current = instance_policy.as_deref() == Some("IgnoreNew");
+    if timing_is_current && battery_is_current && instance_policy_is_current {
+        return Some(RuntimeContract::Current);
+    }
+
+    let has_known_battery_defaults =
+        [&disallow_on_battery, &stop_on_battery]
+            .into_iter()
+            .all(|value| {
+                value
+                    .as_deref()
+                    .is_none_or(|value| matches!(value, "true" | "false"))
+            });
+    let has_known_instance_policy = instance_policy
+        .as_deref()
+        .is_none_or(|value| matches!(value, "Parallel" | "Queue" | "IgnoreNew" | "StopExisting"));
+    let has_legacy_time_limit = delay.is_none()
+        && restart.is_none()
+        && execution_limit
+            .as_deref()
+            .is_none_or(|value| value == "PT72H");
+    (has_legacy_time_limit
+        || (timing_is_current && has_known_battery_defaults && has_known_instance_policy))
+        .then_some(RuntimeContract::LegacyResilience)
+}
+
+fn parse_task_action_contract(xml: &str) -> Option<((String, String), RuntimeContract)> {
     let principals = xml_element(xml, "Principals")?;
+    if xml_tag(principals, "LogonType")?.as_str() != "InteractiveToken" {
+        return None;
+    }
     if xml_tag(principals, "RunLevel")?.as_str() != "HighestAvailable" {
         return None;
     }
@@ -584,6 +734,7 @@ fn parse_task_action(xml: &str) -> Option<(String, String)> {
     if !xml_enabled_or_default(settings) {
         return None;
     }
+    let runtime = runtime_contract(logon_trigger, settings)?;
     let actions = xml_element(xml, "Actions")?;
     if xml_direct_child_names(actions)? != ["Exec"] {
         return None;
@@ -591,37 +742,73 @@ fn parse_task_action(xml: &str) -> Option<(String, String)> {
     let exec = xml_element(actions, "Exec")?;
     let command = normalize_task_command(&xml_tag(exec, "Command")?)?;
     let arguments = xml_tag(exec, "Arguments").unwrap_or_default();
-    Some((command, arguments))
+    Some(((command, arguments), runtime))
+}
+
+fn parse_task_action(xml: &str) -> Option<(String, String)> {
+    let (action, runtime) = parse_task_action_contract(xml)?;
+    (runtime == RuntimeContract::Current).then_some(action)
+}
+
+fn parse_legacy_task_action(xml: &str) -> Option<(String, String)> {
+    let (action, runtime) = parse_task_action_contract(xml)?;
+    (runtime == RuntimeContract::LegacyResilience).then_some(action)
+}
+
+fn action_matches_current_exe(command: &str, arguments: &str) -> Option<bool> {
+    let expected = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::canonicalize(path).ok())?;
+    let command = std::fs::canonicalize(PathBuf::from(command)).ok()?;
+    if command != expected || validate_protected_autostart_path(&command).is_err() {
+        return None;
+    }
+    let arguments = arguments.trim();
+    if !arguments.is_empty() && arguments != MINIMIZED_FLAG {
+        return None;
+    }
+    Some(arguments == MINIMIZED_FLAG)
+}
+
+fn query_task_xml() -> Option<String> {
+    let out = schtasks_cmd()
+        .args(["/query", "/tn", TASK_NAME, "/xml"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 // 작업 존재뿐 아니라 action이 현재 보호 설치본과 정확히 일치하는지 확인한다.
 pub fn query_autostart() -> (bool, bool) {
-    let out = match schtasks_cmd()
-        .args(["/query", "/tn", TASK_NAME, "/xml"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return (false, false),
+    let Some(text) = query_task_xml() else {
+        return (false, false);
     };
-    let text = String::from_utf8_lossy(&out.stdout);
     let Some((command, arguments)) = parse_task_action(&text) else {
         return (false, false);
     };
-    let Ok(expected) = std::env::current_exe().and_then(std::fs::canonicalize) else {
-        return (false, false);
-    };
-    let command = PathBuf::from(command);
-    let Ok(command) = std::fs::canonicalize(command) else {
-        return (false, false);
-    };
-    if command != expected || validate_protected_autostart_path(&command).is_err() {
-        return (false, false);
-    }
-    let arguments = arguments.trim();
-    if !arguments.is_empty() && arguments != MINIMIZED_FLAG {
-        return (false, false);
-    }
-    (true, arguments == MINIMIZED_FLAG)
+    action_matches_current_exe(&command, &arguments)
+        .map(|minimized| (true, minimized))
+        .unwrap_or((false, false))
+}
+
+// 구버전 schtasks 작업만 안전하게 판별하여 새 계약으로 교체한다.
+// 다른 실행 파일/인자/트리거를 가진 작업은 고정 이름이 같아도 덮어쓰지 않는다.
+pub fn repair_legacy_autostart() -> Result<bool, Error> {
+    with_autostart_operation(|| {
+        let Some(text) = query_task_xml() else {
+            return Ok(false);
+        };
+        let Some((command, arguments)) = parse_legacy_task_action(&text) else {
+            return Ok(false);
+        };
+        let Some(with_tray) = action_matches_current_exe(&command, &arguments) else {
+            return Ok(false);
+        };
+        register_autostart_unlocked(with_tray)?;
+        Ok(true)
+    })
 }
 
 #[cfg(test)]
@@ -863,9 +1050,9 @@ mod tests {
 
     #[test]
     fn task_xml_action_parser_keeps_command_and_exact_arguments_separate() {
-        let xml = r#"<Task><Triggers><LogonTrigger /></Triggers>
-        <Principals><Principal><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
-        <Settings><Enabled>true</Enabled></Settings><Actions><Exec>
+        let xml = r#"<Task><Triggers><LogonTrigger><Delay>PT30S</Delay></LogonTrigger></Triggers>
+        <Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+        <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>true</Enabled><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions><Exec>
           <Command>"C:\Program Files\BDO Optimizer\bdo-optimizer-launcher.exe"</Command>
           <Arguments>--minimized</Arguments>
         </Exec></Actions></Task>"#;
@@ -877,6 +1064,91 @@ mod tests {
                 "--minimized".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn task_xml_requires_non_expiring_delayed_restart_contract() {
+        let legacy = r#"<Task><Triggers><LogonTrigger /></Triggers>
+        <Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+        <Settings><Enabled>true</Enabled><ExecutionTimeLimit>PT72H</ExecutionTimeLimit></Settings><Actions><Exec>
+          <Command>C:\app.exe</Command><Arguments>--minimized</Arguments>
+        </Exec></Actions></Task>"#;
+        let resilient = r#"<Task><Triggers><LogonTrigger><Delay>PT30S</Delay></LogonTrigger></Triggers>
+        <Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+        <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>true</Enabled><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+          <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
+        </Settings><Actions><Exec>
+          <Command>C:\app.exe</Command><Arguments>--minimized</Arguments>
+        </Exec></Actions></Task>"#;
+
+        assert_eq!(parse_task_action(legacy), None);
+        assert_eq!(
+            parse_legacy_task_action(legacy),
+            Some((r"C:\app.exe".to_string(), MINIMIZED_FLAG.to_string()))
+        );
+        assert_eq!(
+            parse_task_action(resilient),
+            Some((r"C:\app.exe".to_string(), MINIMIZED_FLAG.to_string()))
+        );
+        assert_eq!(parse_legacy_task_action(resilient), None);
+
+        let battery_sensitive = resilient.replace(
+            "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
+            "<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>",
+        );
+        assert_eq!(parse_task_action(&battery_sensitive), None);
+        assert_eq!(
+            parse_legacy_task_action(&battery_sensitive),
+            Some((r"C:\app.exe".to_string(), MINIMIZED_FLAG.to_string()))
+        );
+
+        let parallel = resilient.replace(
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+            "<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>",
+        );
+        assert_eq!(parse_task_action(&parallel), None);
+        assert_eq!(
+            parse_legacy_task_action(&parallel),
+            Some((r"C:\app.exe".to_string(), MINIMIZED_FLAG.to_string()))
+        );
+
+        let windowed_legacy = legacy.replace("<Arguments>--minimized</Arguments>", "");
+        assert_eq!(
+            parse_legacy_task_action(&windowed_legacy),
+            Some((r"C:\app.exe".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn user_autostart_change_runs_after_inflight_legacy_repair() {
+        let lock = std::sync::Arc::new(Mutex::new(()));
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (query_tx, query_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let repair_lock = lock.clone();
+            let repair_enabled = enabled.clone();
+            scope.spawn(move || {
+                with_operation_lock(&repair_lock, || {
+                    query_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                    repair_enabled.store(true, std::sync::atomic::Ordering::Release);
+                });
+            });
+
+            query_rx.recv().unwrap();
+            let user_lock = lock.clone();
+            let user_enabled = enabled.clone();
+            scope.spawn(move || {
+                with_operation_lock(&user_lock, || {
+                    user_enabled.store(false, std::sync::atomic::Ordering::Release);
+                });
+            });
+            continue_tx.send(()).unwrap();
+        });
+
+        assert!(!enabled.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
@@ -893,7 +1165,7 @@ mod tests {
 
     #[test]
     fn task_xml_accepts_escaped_quotes_and_rejects_unbalanced_quotes() {
-        let valid = r#"<Task><Triggers><LogonTrigger /></Triggers><Principals><Principal><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings /><Actions Context="Author"><Exec><Command>&quot;C:\Program Files\app.exe&quot;</Command></Exec></Actions></Task>"#;
+        let valid = r#"<Task><Triggers><LogonTrigger><Delay>PT30S</Delay></LogonTrigger></Triggers><Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions Context="Author"><Exec><Command>&quot;C:\Program Files\app.exe&quot;</Command></Exec></Actions></Task>"#;
         assert_eq!(
             parse_task_action(valid),
             Some((r"C:\Program Files\app.exe".to_string(), String::new()))
@@ -907,10 +1179,60 @@ mod tests {
 
     #[test]
     fn task_xml_rejects_extra_triggers_and_actions() {
-        let mixed_trigger = r#"<Task><Triggers><LogonTrigger /><CalendarTrigger /></Triggers><Principals><Principal><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings /><Actions><Exec><Command>C:\app.exe</Command></Exec></Actions></Task>"#;
-        let multiple_actions = r#"<Task><Triggers><LogonTrigger /></Triggers><Principals><Principal><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings /><Actions><Exec><Command>C:\app.exe</Command></Exec><Exec><Command>C:\other.exe</Command></Exec></Actions></Task>"#;
+        let mixed_trigger = r#"<Task><Triggers><LogonTrigger><Delay>PT30S</Delay></LogonTrigger><CalendarTrigger /></Triggers><Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions><Exec><Command>C:\app.exe</Command></Exec></Actions></Task>"#;
+        let multiple_actions = r#"<Task><Triggers><LogonTrigger><Delay>PT30S</Delay></LogonTrigger></Triggers><Principals><Principal><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions><Exec><Command>C:\app.exe</Command></Exec><Exec><Command>C:\other.exe</Command></Exec></Actions></Task>"#;
 
         assert_eq!(parse_task_action(mixed_trigger), None);
         assert_eq!(parse_task_action(multiple_actions), None);
+    }
+
+    #[test]
+    fn task_xml_builder_escapes_path_and_emits_resilience_contract() {
+        let xml = build_task_xml(
+            Path::new(r"C:\Program Files\A&B\bdo-optimizer-launcher.exe"),
+            true,
+        );
+
+        assert!(xml.contains(r"C:\Program Files\A&amp;B\bdo-optimizer-launcher.exe"));
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(xml.contains("<Delay>PT30S</Delay>"));
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(xml.contains("<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count>"));
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+        assert!(xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
+        assert!(xml.contains("<Arguments>--minimized</Arguments>"));
+    }
+
+    #[test]
+    fn windows_task_scheduler_parses_resilience_contract_without_registration() {
+        let xml = build_task_xml(Path::new(r"C:\Windows\System32\notepad.exe"), true);
+        let _com = ComInitialization::initialize().unwrap();
+        let parsed: windows::core::Result<String> = unsafe {
+            (|| {
+                let service: ITaskService =
+                    CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)?;
+                let empty = VARIANT::default();
+                service.Connect(&empty, &empty, &empty, &empty)?;
+                let definition = service.NewTask(0)?;
+                definition.SetXmlText(&BSTR::from(xml.as_str()))?;
+                let mut normalized = BSTR::new();
+                definition.XmlText(&mut normalized)?;
+                Ok(normalized.to_string())
+            })()
+        };
+
+        let parsed = parsed.unwrap();
+        assert!(parsed.contains("<Delay>PT30S</Delay>"));
+        assert!(parsed.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(parsed.contains("<RestartOnFailure>"));
+        assert!(parsed.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+        assert!(parsed.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
+        let triggers = xml_element(&parsed, "Triggers").unwrap();
+        let logon_trigger = xml_element(triggers, "LogonTrigger").unwrap();
+        let settings = xml_element(&parsed, "Settings").unwrap();
+        assert_eq!(
+            runtime_contract(logon_trigger, settings),
+            Some(RuntimeContract::Current)
+        );
     }
 }

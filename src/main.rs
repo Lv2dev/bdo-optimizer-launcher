@@ -12,7 +12,11 @@ fn main() {
         std::process::exit(0);
     }
 
+    tauri_lifecycle::initialize_startup();
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(backend::update::PendingUpdateState::default())
+        .on_page_load(tauri_lifecycle::on_page_load)
         .setup(tauri_lifecycle::setup)
         .invoke_handler(tauri::generate_handler![
             tauri_commands::get_app_state,
@@ -23,7 +27,7 @@ fn main() {
             tauri_commands::open_log_folder,
             tauri_commands::check_for_updates,
             tauri_commands::check_update_alert,
-            tauri_commands::open_update_release,
+            tauri_commands::install_update,
             tauri_commands::open_repository,
             tauri_commands::refresh_game_status,
             tauri_commands::launch_game,

@@ -43,6 +43,25 @@ function Invoke-ExpectedFailure([string]$file, [string[]]$arguments, [string]$sc
     if ($process.ExitCode -eq 0) { throw "$scenario unexpectedly succeeded" }
 }
 
+function Get-InstalledProcesses {
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name='bdo-optimizer-launcher.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { [string]$_.ExecutablePath -ieq $installedExe }
+    )
+}
+
+function Wait-InstalledProcess([bool]$Present, [int]$TimeoutSeconds) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $processes = @(Get-InstalledProcesses)
+        if (($Present -and $processes.Count -gt 0) -or (-not $Present -and $processes.Count -eq 0)) {
+            return $processes
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Installed process presence did not become '$Present' within $TimeoutSeconds seconds."
+}
+
 function Test-Task([string]$name) {
     & $schtasks /Query /TN $name *> $null
     return $LASTEXITCODE -eq 0
@@ -111,7 +130,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Failed to seed user-writable installer ACL" }
     if (-not (Test-DangerousUntrustedAce $installDir)) { throw "Seeded user-writable ACL was not observable" }
 
-    Invoke-Checked $installerPath @("/S")
+    Invoke-Checked $installerPath @("/P", "/UPDATE", "/R", "/ARGS", "--minimized")
+    $restartedProcesses = @(Wait-InstalledProcess $true 15)
+    foreach ($process in $restartedProcesses) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+    }
+    Wait-InstalledProcess $false 10 | Out-Null
     if (Test-Path -LiteralPath $untrustedUninstallMarker) {
         throw "Untrusted existing uninstaller was executed"
     }

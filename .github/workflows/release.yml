@@ -154,6 +154,9 @@ jobs:
         run: cargo test --all-targets --locked
 
       - name: Tauri build (production assets + per-machine NSIS)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build
 
       - name: Verify production embed and normalize installer name
@@ -167,7 +170,27 @@ jobs:
           if ($installers.Count -ne 1) {
             throw "Expected exactly one NSIS installer, found $($installers.Count)"
           }
+          $signatures = @(Get-ChildItem -LiteralPath target/release/bundle/nsis -Filter '*.exe.sig' -File)
+          if ($signatures.Count -ne 1 -or $signatures[0].FullName -cne "$($installers[0].FullName).sig") {
+            throw "Expected exactly one matching NSIS updater signature"
+          }
           Copy-Item -LiteralPath $installers[0].FullName -Destination target/release/bdo-optimizer-launcher-setup.exe
+          Copy-Item -LiteralPath $signatures[0].FullName -Destination target/release/bdo-optimizer-launcher-setup.exe.sig
+
+      - name: Verify updater signature against embedded public key
+        env:
+          UPDATER_ARTIFACT: target/release/bdo-optimizer-launcher-setup.exe
+          UPDATER_SIGNATURE: target/release/bdo-optimizer-launcher-setup.exe.sig
+        run: cargo test backend::update::tests::release_artifact_signature_matches_embedded_public_key --locked -- --ignored --exact
+
+      - name: Create static updater manifest
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          ./scripts/create_updater_manifest.ps1 -Version $version -Tag $env:RELEASE_TAG -Repository $env:REPOSITORY -InstallerPath target/release/bdo-optimizer-launcher-setup.exe -SignaturePath target/release/bdo-optimizer-launcher-setup.exe.sig -NotesPath docs/releases/$version.md -OutputPath target/release/latest.json
 
       - name: Smoke test install, upgrade, and uninstall cleanup
         shell: pwsh
@@ -178,20 +201,32 @@ jobs:
           ./scripts/smoke_test_installer.ps1 -Installer target/release/bdo-optimizer-launcher-setup.exe -ExpectedVersion $version -AllowSystemChanges
           $global:LASTEXITCODE = 0
 
-      - name: Compute installer SHA-256
+      - name: Compute release asset SHA-256
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
         run: |
+          $version = $env:RELEASE_TAG.Substring(1)
           $installer = "target/release/bdo-optimizer-launcher-setup.exe"
           $installerHash = (Get-FileHash $installer -Algorithm SHA256).Hash
+          $signatureHash = (Get-FileHash "$installer.sig" -Algorithm SHA256).Hash
+          $updaterManifestHash = (Get-FileHash target/release/latest.json -Algorithm SHA256).Hash
           $manualHash = (Get-FileHash docs/distribution/manual.pdf -Algorithm SHA256).Hash
           @(
             "$installerHash  bdo-optimizer-launcher-setup.exe"
+            "$signatureHash  bdo-optimizer-launcher-setup.exe.sig"
+            "$updaterManifestHash  latest.json"
             "$manualHash  manual.pdf"
           ) | Out-File -FilePath "target/release/SHA256SUMS.txt" -Encoding ascii
           New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          $releaseNotes = "docs/releases/$version.md"
+          if (-not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) { throw "Missing release notes: $releaseNotes" }
           Copy-Item -LiteralPath $installer -Destination release-assets/bdo-optimizer-launcher-setup.exe
+          Copy-Item -LiteralPath "$installer.sig" -Destination release-assets/bdo-optimizer-launcher-setup.exe.sig
+          Copy-Item -LiteralPath target/release/latest.json -Destination release-assets/latest.json
           Copy-Item -LiteralPath target/release/SHA256SUMS.txt -Destination release-assets/SHA256SUMS.txt
           Copy-Item -LiteralPath docs/distribution/manual.pdf -Destination release-assets/manual.pdf
+          Copy-Item -LiteralPath $releaseNotes -Destination release-assets/release-notes.md
 
       - name: Upload verified release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -267,7 +302,7 @@ jobs:
             if ($_ -notmatch '^([0-9A-Fa-f]{64})  (.+)$') { throw "Invalid SHA256SUMS line: $_" }
             $expected[$Matches[2]] = $Matches[1].ToUpperInvariant()
           }
-          foreach ($name in @('bdo-optimizer-launcher-setup.exe', 'manual.pdf')) {
+          foreach ($name in @('bdo-optimizer-launcher-setup.exe', 'bdo-optimizer-launcher-setup.exe.sig', 'latest.json', 'manual.pdf')) {
             if (-not $expected.ContainsKey($name)) { throw "Missing hash entry: $name" }
             $actual = (Get-FileHash "release-assets/$name" -Algorithm SHA256).Hash
             if ($actual -cne $expected[$name]) { throw "Hash mismatch: $name" }
@@ -280,17 +315,12 @@ jobs:
           name: ${{ needs.build.outputs.release_tag }}
           draft: false
           prerelease: ${{ needs.build.outputs.prerelease }}
-          generate_release_notes: true
-          body: |
-            ## bdo-optimizer-launcher ${{ needs.build.outputs.release_tag }}
-
-            `bdo-optimizer-launcher-setup.exe`를 실행해 Program Files에 설치하세요.
-            코드사이닝 미적용으로 첫 설치 시 SmartScreen이 표시될 수 있습니다.
-
-            **SHA-256 무결성 검증**: `SHA256SUMS.txt`와 설치 프로그램의 해시를 비교하세요.
-            **요구사항**: Windows 10 1809+ / x64 / 관리자 권한.
+          generate_release_notes: false
+          body_path: release-assets/release-notes.md
           files: |
             release-assets/bdo-optimizer-launcher-setup.exe
+            release-assets/bdo-optimizer-launcher-setup.exe.sig
+            release-assets/latest.json
             release-assets/SHA256SUMS.txt
             release-assets/manual.pdf
           fail_on_unmatched_files: true

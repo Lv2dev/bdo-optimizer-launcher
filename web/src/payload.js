@@ -1,6 +1,6 @@
 const DIRECT_STATUS_COMMANDS = new Set([
   "open_log_folder",
-  "open_update_release",
+  "install_update",
   "open_repository",
 ]);
 

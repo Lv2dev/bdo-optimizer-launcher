@@ -29,6 +29,8 @@ $files = @(
     "scripts\check_release_workflow.ps1",
     "scripts\installer_acl_guard.ps1",
     "scripts\smoke_test_installer.ps1",
+    "scripts\create_updater_manifest.ps1",
+    "scripts\test_updater_manifest.ps1",
     "README.md",
     "app.manifest",
     "app.dev.manifest",
@@ -42,6 +44,8 @@ $files = @(
     "windows\installer.nsi",
     "windows\hooks.nsh",
     "web\src\browserPreview.js",
+    "docs\readme\overview.png",
+    "docs\readme\app-tour.gif",
     "docs\distribution\manual.html",
     "docs\distribution\manual.build.json",
     "docs\distribution\manual.pdf"
@@ -52,6 +56,8 @@ $files += @(
 )
 
 $package = Get-Content -LiteralPath (Join-Path $root "package.json") -Raw | ConvertFrom-Json
+$releaseNotesRelative = "docs\releases\$($package.version).md"
+$files += $releaseNotesRelative
 $expectedTag = "v$($package.version)"
 
 function Copy-Fixture {
@@ -93,6 +99,52 @@ function Assert-BinaryMutationRejected([string]$relative) {
     if ((Invoke-Guard) -eq 0) { throw "Release guard accepted stale manual input: $relative" }
 }
 
+function Assert-CargoLockCrLfAccepted {
+    Copy-Fixture
+    $path = Join-Path $fixture "Cargo.lock"
+    $text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n").Replace("`r", "`n")
+    [IO.File]::WriteAllText($path, $text.Replace("`n", "`r`n"), [Text.UTF8Encoding]::new($false))
+    if ((Invoke-Guard) -ne 0) { throw "Release guard rejected a Windows CRLF Cargo.lock" }
+}
+
+function Assert-CrLfMutationRejected([string]$relative, [string]$pattern, [string]$replacement) {
+    Copy-Fixture
+    $path = Join-Path $fixture $relative
+    $text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", "`r`n")
+    $changed = $text -replace $pattern, $replacement
+    if ($changed -eq $text) { throw "CRLF fixture mutation did not change $relative" }
+    [IO.File]::WriteAllText($path, $changed, [Text.UTF8Encoding]::new($false))
+    if ((Invoke-Guard) -eq 0) { throw "Release guard accepted invalid CRLF mutation: $relative" }
+}
+
+function Assert-MissingReleaseNotesRejected {
+    Copy-Fixture
+    Remove-Item -LiteralPath (Join-Path $fixture $releaseNotesRelative) -Force
+    if ((Invoke-Guard) -eq 0) { throw "Release guard accepted missing Korean release notes" }
+}
+
+function Assert-EnglishReleaseBulletRejected {
+    Copy-Fixture
+    $path = Join-Path $fixture $releaseNotesRelative
+    [IO.File]::AppendAllText($path, "`n- fixed updater reliability`n", [Text.UTF8Encoding]::new($false))
+    if ((Invoke-Guard) -eq 0) { throw "Release guard accepted an English-only change bullet" }
+}
+
+function Assert-MissingReadmeAssetRejected([string]$relative) {
+    Copy-Fixture
+    Remove-Item -LiteralPath (Join-Path $fixture $relative) -Force
+    if ((Invoke-Guard) -eq 0) { throw "Release guard accepted missing README asset: $relative" }
+}
+
+function Assert-ReadmeAssetBudgetRejected {
+    Copy-Fixture
+    $path = Join-Path $fixture "docs\readme\app-tour.gif"
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try { $stream.SetLength(8MB + 1) }
+    finally { $stream.Dispose() }
+    if ((Invoke-Guard) -eq 0) { throw "Release guard accepted oversized README assets" }
+}
+
 function Assert-RipgrepInstallAfterEmbedRejected {
     Copy-Fixture
     $path = Join-Path $fixture ".github\workflows\release.yml"
@@ -112,9 +164,18 @@ function Assert-RipgrepInstallAfterEmbedRejected {
 try {
     Copy-Fixture
     if ((Invoke-Guard) -ne 0) { throw "Valid release fixture was rejected" }
+    Assert-CargoLockCrLfAccepted
     Assert-MutationRejected "app.manifest" 'level="requireAdministrator"' 'level="asInvoker"'
     Assert-MutationRejected "app.dev.manifest" 'level="asInvoker"' 'level="requireAdministrator"'
     Assert-MutationRejected "package.json" '"tauri:build":\s*"tauri build"' '"tauri:build": "cargo build --release"'
+    Assert-MutationRejected "package.json" '"postcss":\s*"8\.5\.25"' '"postcss": "8.5.18"'
+    Assert-MutationRejected "package-lock.json" '"version":\s*"8\.5\.25"' '"version": "8.5.15"'
+    Assert-MutationRejected "README.md" 'assets/app_256\.png' 'assets/missing-logo.png'
+    Assert-MutationRejected "README.md" 'BDO Optimizer Launcher 제어 탭에서 게임 상태와 CPU 최적화 모드를 관리하는 화면' '대표 화면'
+    Assert-MutationRejected "README.md" 'docs/readme/app-tour\.gif' 'docs/readme/app-tour.webp'
+    Assert-MissingReadmeAssetRejected "docs\readme\overview.png"
+    Assert-MissingReadmeAssetRejected "docs\readme\app-tour.gif"
+    Assert-ReadmeAssetBudgetRejected
     Assert-MutationRejected ".gitattributes" '(?m)^docs/distribution/manual\.html text eol=lf\r?$' 'docs/distribution/manual.html text eol=crlf'
     Assert-MutationRejected ".gitattributes" '(?m)^docs/distribution/manual\.html text eol=lf\r?$' "docs/distribution/manual.html text eol=lf`r`ndocs/distribution/manual.html text eol=crlf"
     Assert-MutationRejected ".gitattributes" '(?m)^windows/hooks\.nsh text eol=lf\r?$' 'windows/hooks.nsh text eol=crlf'
@@ -122,6 +183,12 @@ try {
     Assert-MutationRejected "package.json" '"@tauri-apps/cli":\s*"2\.11\.2"' '"@tauri-apps/cli": "^2.0.0"'
     Assert-MutationRejected "tauri.conf.json" ('"version":\s*"' + [regex]::Escape([string]$package.version) + '"') '"version": "9.9.9"'
     Assert-MutationRejected "tauri.conf.json" '"template":\s*"\./windows/installer\.nsi"' '"template": "./windows/other.nsi"'
+    Assert-MutationRejected "tauri.conf.json" '"createUpdaterArtifacts":\s*true' '"createUpdaterArtifacts": false'
+    Assert-MutationRejected "tauri.conf.json" 'https://github\.com/Lv2dev/bdo-optimizer-launcher/releases/latest/download/latest\.json' 'https://attacker.invalid/latest.json'
+    Assert-MutationRejected "tauri.conf.json" '"installMode":\s*"passive"' '"installMode": "quiet"'
+    Assert-MutationRejected "tauri.conf.json" 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6' 'QUFBQQ=='
+    Assert-MutationRejected "Cargo.toml" '(?m)^tauri-plugin-updater\s*=\s*"2"\s*$' 'tauri-plugin-updater = "1"'
+    Assert-MutationRejected "Cargo.lock" '(?m)^name = "tauri-plugin-updater"\r?\nversion = "2\.10\.1"\r?$' "name = \"tauri-plugin-updater\"`nversion = \"2.9.0\""
     Assert-MutationRejected "windows\installer.nsi" 'existing NSIS uninstaller is never elevated' 'existing NSIS uninstaller may be elevated'
     Assert-MutationRejected "windows\installer.nsi" 'Unicode true' 'Unicode false'
     Assert-MutationRejected "windows\hooks.nsh" '/reset /T /L /Q' '/reset /T /Q'
@@ -133,6 +200,7 @@ try {
     Assert-MutationRejected "windows\hooks.nsh" '\$\{DisableX64FSRedirection\}' '${EnableX64FSRedirection}'
     Assert-MutationRejected "scripts\installer_acl_guard.ps1" 'RawSecurityDescriptor' 'CommonSecurityDescriptor'
     Assert-MutationRejected "scripts\smoke_test_installer.ps1" '(?m)^\$global:LASTEXITCODE = 0\s*$' '$global:LASTEXITCODE = 1'
+    Assert-MutationRejected "scripts\smoke_test_installer.ps1" '"/P", "/UPDATE", "/R", "/ARGS", "--minimized"' '"/S"'
     Assert-MutationRejected ".github\workflows\release.yml" 'cargo-audit --version 0\.22\.2 --locked' 'cargo-audit --version 0.22.1 --locked'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo audit\s*$' '$1run: cargo test'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo install ripgrep --version 15\.1\.0 --locked\s*$' '$1run: cargo --version'
@@ -149,6 +217,16 @@ try {
     Assert-MutationRejected ".github\workflows\release.yml" '\$target\.sha -cne \$env:EXPECTED_COMMIT' '$target.sha -ceq $env:EXPECTED_COMMIT'
     Assert-MutationRejected ".github\workflows\release.yml" 'compare/\$env:EXPECTED_COMMIT\.\.\.\$env:DEFAULT_BRANCH' 'compare/$env:DEFAULT_BRANCH...$env:EXPECTED_COMMIT'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s+)environment:\s*release\s*$' '$1environment: unprotected'
+    Assert-MutationRejected ".github\workflows\release.yml" 'secrets\.TAURI_SIGNING_PRIVATE_KEY' 'secrets.WRONG_UPDATER_KEY'
+    Assert-MutationRejected ".github\workflows\release.yml" 'backend::update::tests::release_artifact_signature_matches_embedded_public_key --locked -- --ignored --exact' 'release_artifact_signature_matches_embedded_public_key --locked -- --ignored --exact'
+    Assert-MutationRejected ".github\workflows\release.yml" 'release_artifact_signature_matches_embedded_public_key --locked -- --ignored --exact' 'cargo test --locked'
+    Assert-MutationRejected ".github\workflows\release.yml" 'release-assets/latest\.json' 'release-assets/missing-latest.json'
+    Assert-MutationRejected ".github\workflows\release.yml" 'generate_release_notes:\s*false' 'generate_release_notes: true'
+    Assert-MutationRejected ".github\workflows\release.yml" 'body_path:\s*release-assets/release-notes\.md' 'body: |'
+    Assert-MutationRejected ".github\workflows\ci.yml" 'test_updater_manifest\.ps1' 'missing_updater_manifest_test.ps1'
+    Assert-MutationRejected "scripts\create_updater_manifest.ps1" 'Lv2dev/bdo-optimizer-launcher' 'attacker/repo'
+    Assert-MutationRejected ".github\workflows\release.yml" '-NotesPath docs/releases/\$version\.md' '-NotesPath docs/releases/missing.md'
+    Assert-MutationRejected "scripts\create_updater_manifest.ps1" 'notes\s*=\s*\$notes' 'missing = $notes'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s+)\$tag = \$env:RELEASE_TAG\s*$' '$1$tag = "${{ inputs.tag }}"'
     foreach ($maliciousTag in @('v0.2.0$(Write-Error injected)', 'v0.2.0";Write-Error injected;"', 'v0.2.0;Write-Error injected')) {
         Copy-Fixture
@@ -156,6 +234,13 @@ try {
     }
     Assert-MutationRejected "docs\distribution\manual.html" ('버전:\s*v' + [regex]::Escape([string]$package.version)) '버전: v9.9.9'
     Assert-MutationRejected "docs\distribution\manual.html" '<title>' '<title>stale '
+    Assert-MissingReleaseNotesRejected
+    Assert-EnglishReleaseBulletRejected
+    Assert-MutationRejected $releaseNotesRelative '(?m)^## 변경 사항\r?$' '## 설치 방법'
+    Assert-CrLfMutationRejected $releaseNotesRelative '(?m)^## 변경 사항\r?$' '## 설치 방법'
+    Assert-MutationRejected $releaseNotesRelative '(?m)^- ' '본문 '
+    Assert-MutationRejected $releaseNotesRelative '(?m)^- ' '- CI 테스트 결과: '
+    Assert-MutationRejected $releaseNotesRelative '(?m)^- ' '- 테스트를 완료했습니다. '
     Assert-BinaryMutationRejected "docs\distribution\screenshots\01-control.png"
     Copy-Fixture
     Copy-Item -LiteralPath (Join-Path $fixture "docs\distribution\screenshots\01-control.png") -Destination (Join-Path $fixture "docs\distribution\screenshots\99-extra.png")

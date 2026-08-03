@@ -1,8 +1,40 @@
-# BDO Optimizer Launcher
+<p align="center">
+  <img src="assets/app_256.png" width="112" alt="BDO Optimizer Launcher 로고">
+</p>
 
-검은사막(BlackDesert64.exe) 실행 + 성능 최적화 + 자동화를 위한 Windows 데스크톱 앱입니다.
+<h1 align="center">BDO Optimizer Launcher</h1>
 
-기존 Windows 배치 스크립트 기반 런처를 **Rust + Tauri/React UI**로 재구현한 설치형 앱이며, 시스템 트레이 상주 + 시간표 자동 모드 전환 + PC 예약 종료 + 실시간 자원 모니터링을 한 화면에서 관리합니다.
+<p align="center">
+  <strong>검은사막 실행부터 성능 최적화와 자동화까지, 한 화면에서 간편하게.</strong>
+</p>
+
+<p align="center">
+  CPU 모드 전환 · 시간표 자동화 · PC 예약 종료 · 실시간 자원 모니터링을 제공하는 Windows 데스크톱 앱입니다.
+</p>
+
+<p align="center">
+  <a href="../../releases/latest"><strong>최신 버전 받기</strong></a>
+  &nbsp;·&nbsp;
+  <a href="docs/distribution/manual.pdf"><strong>사용 설명서</strong></a>
+</p>
+
+<p align="center">
+  <sub>Windows 10/11 · x64 · 관리자 권한 필요</sub>
+</p>
+
+<p align="center">
+  <img src="docs/readme/overview.png" width="760" alt="BDO Optimizer Launcher 제어 탭에서 게임 상태와 CPU 최적화 모드를 관리하는 화면">
+</p>
+
+## 화면 둘러보기
+
+<p align="center">
+  <img src="docs/readme/app-tour.gif" width="720" alt="BDO Optimizer Launcher의 제어, 스케줄, 모니터, 설정 탭을 순서대로 보여주는 제품 화면">
+</p>
+
+<p align="center">
+  <sub>제어 → 스케줄 → 모니터 → 설정</sub>
+</p>
 
 ---
 
@@ -56,7 +88,7 @@ Get-Content .\SHA256SUMS.txt
 | **자동 트레이/복원** | 게임이 트레이로 내려가면 자동 저전력 모드 + 다시 나타나면 직전 모드 복원 |
 | **단일 인스턴스** | Named Mutex로 중복 실행 차단, 두 번째 실행은 기존 창 포그라운드 |
 | **자동 시작** | 작업 스케줄러 로그온 트리거(UAC 프롬프트 없이 승격). 사용자 쓰기 가능성이 높은 위치의 .exe는 등록 거부. 트레이 시작 옵션 가능 |
-| **업데이트 알림** | 새 버전의 릴리스 페이지를 엽니다. 새 setup을 내려받고 트레이에서 앱을 종료한 뒤 덮어 설치합니다. 실행 파일 자동 교체는 하지 않습니다 |
+| **인앱 업데이트** | 새 버전을 자동 확인하고, `업데이트 설치`를 누르면 서명된 setup을 앱에서 내려받아 검증·설치한 뒤 자동으로 다시 실행합니다 |
 | **자원 모니터링** | 검은사막 프로세스의 CPU/메모리/GPU/VRAM/Disk I/O/FPS 실시간 + 코어별 사용률 (갱신 주기 0.5/1/2초 선택) |
 | **테마** | 라이트/다크/Windows 자동 (OS 설정 추종) |
 | **접근성** | Tab 키 순회, Ctrl+1~4 탭 단축키, ESC 캘린더 dismiss, 주요 커스텀 컨트롤의 키보드 활성화 |
@@ -89,7 +121,9 @@ AMD CPU 및 구형 Intel CPU(11세대 이하)는 기존 로직(짝수 비트/전
 자동 시작은 공식 설치 프로그램으로 Program Files에 설치된 보호 실행 파일에서만 등록됩니다. portable 복사본에서는 등록되지 않으므로 설치 프로그램으로 다시 설치한 뒤 토글하세요.
 
 ### 새 버전으로 업데이트하기
-설정 탭에서 릴리스 페이지를 연 뒤 새 `bdo-optimizer-launcher-setup.exe`를 내려받습니다. 트레이 메뉴에서 앱을 완전히 종료하고 설치 프로그램을 다시 실행하면 기존 설정을 유지한 채 덮어 설치됩니다. 자동 시작과 예약 종료 작업도 업그레이드 중에는 유지됩니다.
+설정 탭에서 **업데이트 확인**을 누른 뒤 새 버전이 표시되면 **업데이트 설치**를 누릅니다. 앱이 설치 파일을 내려받아 서명을 검증하고, 진행 창을 표시한 채 기존 설치본을 갱신한 다음 자동으로 다시 실행합니다. 기존 설정과 자동 시작·예약 종료 작업은 유지됩니다.
+
+현재 설치본에 **업데이트 설치** 버튼이 없다면 updater가 포함된 최신 `bdo-optimizer-launcher-setup.exe`를 Releases 페이지에서 한 번만 수동 설치해야 합니다. 그 이후 버전부터는 Release 페이지로 이동하지 않고 앱 안에서 업데이트할 수 있습니다.
 
 ### 앱 제거하기
 Windows 설정 → 앱 → 설치된 앱 → **BDO Optimizer** → 제거를 사용합니다. 제거 프로그램은 앱 파일과 자동 시작·단발·매주 예약 작업을 정리합니다. 사용자 설정 `%APPDATA%\bdo-optimizer-launcher`와 로그 `%LOCALAPPDATA%\bdo-optimizer-launcher`는 진단·재설치를 위해 남으므로, 완전 삭제가 필요하면 제거 후 직접 지우세요.

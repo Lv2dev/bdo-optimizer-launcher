@@ -378,6 +378,165 @@ describe("키보드 접근성", () => {
     expect(screen.getByText(EMPTY_STATE.monitor.statusText)).toBeTruthy();
   });
 
+  test("새 버전은 릴리스 페이지 없이 앱 안에서 다운로드 진행 후 설치한다", async () => {
+    const user = userEvent.setup();
+    const install = deferred();
+    const updateState = {
+      ...EMPTY_STATE,
+      update: {
+        ...EMPTY_STATE.update,
+        statusText: "새 버전 0.3.0 사용 가능.",
+        available: true,
+        latestVersion: "0.3.0",
+        notes: "- 인앱 업데이트 추가",
+      },
+    };
+    let progressChannel;
+    const channelFactory = vi.fn((onmessage) => {
+      progressChannel = { onmessage };
+      return progressChannel;
+    });
+    const nativeInvoke = vi.fn((command) => {
+      if (command === "get_app_state") return Promise.resolve(updateState);
+      if (command === "list_schedule_rules") return Promise.resolve(updateState.schedule);
+      if (command === "get_shutdown_state") return Promise.resolve(updateState.shutdown);
+      if (command === "install_update") return install.promise;
+      return Promise.resolve({ status: EMPTY_STATE.status, control: EMPTY_STATE.control });
+    });
+
+    render(
+      <App
+        initialState={updateState}
+        nativeInvoke={nativeInvoke}
+        runtimeCheck={() => true}
+        channelFactory={channelFactory}
+      />,
+    );
+    await act(async () => {});
+    await user.click(screen.getByRole("tab", { name: "설정" }));
+
+    expect(screen.queryByRole("button", { name: "릴리스 열기" })).toBeNull();
+    expect(screen.getByText("- 인앱 업데이트 추가")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "업데이트 설치" }));
+    expect(nativeInvoke).toHaveBeenCalledWith(
+      "install_update",
+      expect.objectContaining({ onEvent: progressChannel }),
+    );
+
+    act(() => {
+      progressChannel.onmessage({ event: "started", data: { contentLength: 200 } });
+      progressChannel.onmessage({
+        event: "progress",
+        data: { downloaded: 100, contentLength: 200 },
+      });
+    });
+    expect(screen.getByText("50%")).toBeTruthy();
+
+    act(() => progressChannel.onmessage({ event: "verifying" }));
+    expect(screen.getByText("다운로드 완료 · 서명 확인 중")).toBeTruthy();
+
+    act(() => progressChannel.onmessage({ event: "installing" }));
+    expect(screen.getByText("서명 확인 완료 · 설치 프로그램 시작 중")).toBeTruthy();
+
+    await act(async () => {
+      install.resolve({ current: "업데이트 설치 프로그램을 시작했습니다.", previous: "" });
+    });
+    await waitFor(() => expect(screen.queryByText("업데이트 다운로드 중")).toBeNull());
+    expect(nativeInvoke.mock.calls.some(([command]) => command === "open_update_release")).toBe(false);
+  });
+
+  test("모니터 그래프는 새 샘플을 화면 밖에서 한 칸 왼쪽으로 이동시킨다", async () => {
+    const state = {
+      ...EMPTY_STATE,
+      settings: { ...EMPTY_STATE.settings, monitorIntervalMs: 2000 },
+      monitor: {
+        ...EMPTY_STATE.monitor,
+        running: true,
+        metrics: {
+          ...EMPTY_STATE.monitor.metrics,
+          cpuPct: 42,
+          memPct: 51,
+          gpuPct: 63,
+          vramPct: 27,
+        },
+      },
+    };
+    const nativeInvoke = vi.fn((command) => {
+      if (command === "get_app_state") return Promise.resolve(state);
+      if (command === "list_schedule_rules") return Promise.resolve(state.schedule);
+      if (command === "get_shutdown_state") return Promise.resolve(state.shutdown);
+      if (command === "get_monitor_snapshot") return Promise.resolve(state.monitor);
+      if (command === "stop_monitor_session") return Promise.resolve(null);
+      return Promise.resolve({ status: state.status, control: state.control });
+    });
+    render(<App initialState={state} nativeInvoke={nativeInvoke} runtimeCheck={() => true} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "모니터" }));
+    await waitFor(() => expect(document.querySelectorAll(".graph-scroll")).toHaveLength(4));
+
+    for (const graph of document.querySelectorAll(".graph-svg")) {
+      const scrollGroup = graph.querySelector(".graph-scroll");
+      const line = scrollGroup.querySelector('path[fill="none"]');
+      const circle = scrollGroup.querySelector("circle");
+      const path = line.getAttribute("d");
+      const coordinates = path.match(/-?\d+(?:\.\d+)?/g).map(Number);
+      const directGridLines = [...graph.children].filter((node) => node.tagName === "line");
+
+      expect(path.match(/\bC\b/g)).toHaveLength(40);
+      expect(coordinates.at(-2)).toBeGreaterThan(320);
+      expect(Number(circle.getAttribute("cx"))).toBeGreaterThan(320);
+      expect(parseFloat(scrollGroup.style.getPropertyValue("--graph-shift"))).toBeCloseTo(
+        -100 / 39,
+      );
+      expect(scrollGroup.style.getPropertyValue("--graph-duration")).toBe("2000ms");
+      expect(directGridLines).toHaveLength(3);
+    }
+  });
+
+  test("모니터 그래프는 수치가 같은 새 snapshot도 시간축에서 진행시킨다", async () => {
+    let snapshot = 0;
+    const state = {
+      ...EMPTY_STATE,
+      settings: { ...EMPTY_STATE.settings, monitorIntervalMs: 500 },
+      monitor: {
+        ...EMPTY_STATE.monitor,
+        running: true,
+        metrics: {
+          ...EMPTY_STATE.monitor.metrics,
+          cpuPct: 42,
+          memPct: 51,
+          gpuPct: 63,
+          vramPct: 27,
+        },
+      },
+    };
+    const nativeInvoke = vi.fn((command) => {
+      if (command === "get_app_state") return Promise.resolve(state);
+      if (command === "list_schedule_rules") return Promise.resolve(state.schedule);
+      if (command === "get_shutdown_state") return Promise.resolve(state.shutdown);
+      if (command === "get_monitor_snapshot") {
+        snapshot += 1;
+        return Promise.resolve({
+          ...state.monitor,
+          statusText: `동일 수치 snapshot ${snapshot}`,
+          metrics: { ...state.monitor.metrics },
+        });
+      }
+      if (command === "stop_monitor_session") return Promise.resolve(null);
+      return Promise.resolve({ status: state.status, control: state.control });
+    });
+    render(<App initialState={state} nativeInvoke={nativeInvoke} runtimeCheck={() => true} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "모니터" }));
+    await waitFor(() => expect(screen.getByText("동일 수치 snapshot 1")).toBeTruthy());
+    const firstGroup = document.querySelector(".graph-scroll");
+
+    await waitFor(() => expect(screen.getByText("동일 수치 snapshot 2")).toBeTruthy(), {
+      timeout: 1500,
+    });
+    expect(document.querySelector(".graph-scroll")).not.toBe(firstGroup);
+  });
+
   test("느린 settings 조회는 최신 accent 저장 결과를 덮어쓰지 않는다", async () => {
     const staleSettings = deferred();
     const savedSettings = { ...EMPTY_STATE.settings, accentPalette: 1 };
