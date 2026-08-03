@@ -107,6 +107,16 @@ function Assert-CargoLockCrLfAccepted {
     if ((Invoke-Guard) -ne 0) { throw "Release guard rejected a Windows CRLF Cargo.lock" }
 }
 
+function Assert-CrLfMutationRejected([string]$relative, [string]$pattern, [string]$replacement) {
+    Copy-Fixture
+    $path = Join-Path $fixture $relative
+    $text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", "`r`n")
+    $changed = $text -replace $pattern, $replacement
+    if ($changed -eq $text) { throw "CRLF fixture mutation did not change $relative" }
+    [IO.File]::WriteAllText($path, $changed, [Text.UTF8Encoding]::new($false))
+    if ((Invoke-Guard) -eq 0) { throw "Release guard accepted invalid CRLF mutation: $relative" }
+}
+
 function Assert-MissingReleaseNotesRejected {
     Copy-Fixture
     Remove-Item -LiteralPath (Join-Path $fixture $releaseNotesRelative) -Force
@@ -226,7 +236,8 @@ try {
     Assert-MutationRejected "docs\distribution\manual.html" '<title>' '<title>stale '
     Assert-MissingReleaseNotesRejected
     Assert-EnglishReleaseBulletRejected
-    Assert-MutationRejected $releaseNotesRelative '(?m)^## 변경 사항$' '## 설치 방법'
+    Assert-MutationRejected $releaseNotesRelative '(?m)^## 변경 사항\r?$' '## 설치 방법'
+    Assert-CrLfMutationRejected $releaseNotesRelative '(?m)^## 변경 사항\r?$' '## 설치 방법'
     Assert-MutationRejected $releaseNotesRelative '(?m)^- ' '본문 '
     Assert-MutationRejected $releaseNotesRelative '(?m)^- ' '- CI 테스트 결과: '
     Assert-MutationRejected $releaseNotesRelative '(?m)^- ' '- 테스트를 완료했습니다. '
