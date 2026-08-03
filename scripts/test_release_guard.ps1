@@ -99,6 +99,14 @@ function Assert-BinaryMutationRejected([string]$relative) {
     if ((Invoke-Guard) -eq 0) { throw "Release guard accepted stale manual input: $relative" }
 }
 
+function Assert-CargoLockCrLfAccepted {
+    Copy-Fixture
+    $path = Join-Path $fixture "Cargo.lock"
+    $text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n").Replace("`r", "`n")
+    [IO.File]::WriteAllText($path, $text.Replace("`n", "`r`n"), [Text.UTF8Encoding]::new($false))
+    if ((Invoke-Guard) -ne 0) { throw "Release guard rejected a Windows CRLF Cargo.lock" }
+}
+
 function Assert-MissingReleaseNotesRejected {
     Copy-Fixture
     Remove-Item -LiteralPath (Join-Path $fixture $releaseNotesRelative) -Force
@@ -146,6 +154,7 @@ function Assert-RipgrepInstallAfterEmbedRejected {
 try {
     Copy-Fixture
     if ((Invoke-Guard) -ne 0) { throw "Valid release fixture was rejected" }
+    Assert-CargoLockCrLfAccepted
     Assert-MutationRejected "app.manifest" 'level="requireAdministrator"' 'level="asInvoker"'
     Assert-MutationRejected "app.dev.manifest" 'level="asInvoker"' 'level="requireAdministrator"'
     Assert-MutationRejected "package.json" '"tauri:build":\s*"tauri build"' '"tauri:build": "cargo build --release"'
@@ -169,6 +178,7 @@ try {
     Assert-MutationRejected "tauri.conf.json" '"installMode":\s*"passive"' '"installMode": "quiet"'
     Assert-MutationRejected "tauri.conf.json" 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6' 'QUFBQQ=='
     Assert-MutationRejected "Cargo.toml" '(?m)^tauri-plugin-updater\s*=\s*"2"\s*$' 'tauri-plugin-updater = "1"'
+    Assert-MutationRejected "Cargo.lock" '(?m)^name = "tauri-plugin-updater"\r?\nversion = "2\.10\.1"\r?$' "name = \"tauri-plugin-updater\"`nversion = \"2.9.0\""
     Assert-MutationRejected "windows\installer.nsi" 'existing NSIS uninstaller is never elevated' 'existing NSIS uninstaller may be elevated'
     Assert-MutationRejected "windows\installer.nsi" 'Unicode true' 'Unicode false'
     Assert-MutationRejected "windows\hooks.nsh" '/reset /T /L /Q' '/reset /T /Q'

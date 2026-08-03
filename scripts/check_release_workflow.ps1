@@ -203,7 +203,7 @@ if ($updaterEndpoints.Count -ne 1 -or [string]$updaterEndpoints[0] -cne 'https:/
 if ([string]$tauri.plugins.updater.windows.installMode -cne 'passive') { throw "Windows updater installMode must be passive" }
 Assert-Match $cargo '(?m)^tauri-plugin-updater\s*=\s*"2"\s*$' "Rust updater plugin dependency is missing"
 Assert-Match $cargo '(?m)^minisign-verify\s*=\s*"=0\.2\.5"\s*$' "Artifact signature verifier must be pinned"
-Assert-Match $cargoLock '(?ms)^name = "tauri-plugin-updater"\r?\nversion = "2\.10\.1"$' "Locked updater plugin version changed"
+Assert-Match $cargoLock '(?ms)^name = "tauri-plugin-updater"\r?\nversion = "2\.10\.1"\r?$' "Locked updater plugin version changed"
 if ([string]$package.devDependencies.'@tauri-apps/cli' -cne '2.11.2') { throw "Tauri CLI must be pinned to 2.11.2" }
 if ([string]$packageLock['packages']['node_modules/@tauri-apps/cli']['version'] -cne '2.11.2') {
     throw "package-lock Tauri CLI must be 2.11.2"
