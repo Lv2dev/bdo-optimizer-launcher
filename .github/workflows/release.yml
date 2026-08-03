@@ -88,23 +88,36 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Checkout trusted release harness
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: .trusted-release-tools
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Verify checked-out tag ancestry and release contract
         shell: pwsh
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EXPECTED_COMMIT: ${{ steps.release_meta.outputs.tag_commit }}
           RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+          TRUSTED_WORKFLOW_SHA: ${{ github.sha }}
         run: |
           $head = (git rev-parse HEAD).Trim()
           $tagCommit = (git rev-parse "refs/tags/$env:RELEASE_TAG^{commit}").Trim()
           if ($LASTEXITCODE -ne 0 -or $head -cne $env:EXPECTED_COMMIT -or $tagCommit -cne $env:EXPECTED_COMMIT) {
             throw "Checked-out commit does not match tag $env:RELEASE_TAG"
           }
+          $harnessHead = (git -C .trusted-release-tools rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $harnessHead -cne $env:TRUSTED_WORKFLOW_SHA) {
+            throw "Release harness does not match the trusted workflow commit"
+          }
           git fetch --no-tags origin "refs/heads/$env:DEFAULT_BRANCH`:refs/remotes/origin/$env:DEFAULT_BRANCH"
           if ($LASTEXITCODE -ne 0) { throw "Failed to fetch origin/$env:DEFAULT_BRANCH" }
           git merge-base --is-ancestor $head "origin/$env:DEFAULT_BRANCH"
           if ($LASTEXITCODE -ne 0) { throw "Tag commit is not an ancestor of origin/$env:DEFAULT_BRANCH" }
-          ./scripts/check_release_workflow.ps1 -ReleaseTag $env:RELEASE_TAG
+          ./.trusted-release-tools/scripts/check_release_workflow.ps1 -ReleaseTag $env:RELEASE_TAG
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -199,7 +212,7 @@ jobs:
           RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
         run: |
           $version = $env:RELEASE_TAG.Substring(1)
-          ./scripts/smoke_test_installer.ps1 -Installer target/release/bdo-optimizer-launcher-setup.exe -ExpectedVersion $version -AllowSystemChanges
+          ./.trusted-release-tools/scripts/smoke_test_installer.ps1 -Installer target/release/bdo-optimizer-launcher-setup.exe -ExpectedVersion $version -AllowSystemChanges
           $global:LASTEXITCODE = 0
 
       - name: Compute release asset SHA-256
