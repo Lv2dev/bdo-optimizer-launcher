@@ -208,6 +208,8 @@ try {
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s+)path:\s*\.trusted-release-tools\s*$' '$1path: .tag-release-tools'
     Assert-MutationRejected ".github\workflows\release.yml" '\./\.trusted-release-tools/scripts/check_release_workflow\.ps1' './scripts/check_release_workflow.ps1'
     Assert-MutationRejected ".github\workflows\release.yml" '\./\.trusted-release-tools/scripts/smoke_test_installer\.ps1' './scripts/smoke_test_installer.ps1'
+    Assert-MutationRejected ".github\workflows\release.yml" '\$installer\s*=\s*\(Resolve-Path -LiteralPath "target/release/bdo-optimizer-launcher-setup\.exe"\)\.Path' '$installer = "target/release/bdo-optimizer-launcher-setup.exe"'
+    Assert-MutationRejected ".github\workflows\release.yml" '-Installer \$installer -ExpectedVersion' '-Installer target/release/bdo-optimizer-launcher-setup.exe -ExpectedVersion'
     Assert-MutationRejected ".github\workflows\release.yml" 'cargo-audit --version 0\.22\.2 --locked' 'cargo-audit --version 0.22.1 --locked'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo audit\s*$' '$1run: cargo test'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s*)run:\s*cargo install ripgrep --version 15\.1\.0 --locked\s*$' '$1run: cargo --version'
