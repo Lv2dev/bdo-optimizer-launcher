@@ -1,5 +1,5 @@
 export const EMPTY_STATE = {
-  appVersion: "0.2.0",
+  appVersion: "0.3.0",
   status: { current: "초기화 중입니다.", previous: "" },
   control: {
     adminOk: false,
@@ -39,8 +39,9 @@ export const EMPTY_STATE = {
     available: false,
     checking: false,
     releaseUrl: "",
-    appVersion: "0.2.0",
+    appVersion: "0.3.0",
     latestVersion: null,
+    notes: null,
   },
   monitor: {
     running: false,
@@ -217,15 +218,14 @@ export function createBrowserPreview() {
         checking: false,
         releaseUrl: "https://github.com/Lv2dev/bdo-optimizer-launcher/releases/latest",
         latestVersion: version,
+        notes: null,
       };
       const response = { status: status(update.statusText), update };
       return command === "check_update_alert"
         ? { ...response, shouldAlert: false, alertText: "" }
         : response;
     }
-    if (command === "open_update_release") {
-      return status(args.url ? "GitHub Release 페이지를 열었습니다." : "열 수 있는 릴리스 페이지가 없습니다.");
-    }
+    if (command === "install_update") return status("업데이트 설치 프로그램을 시작했습니다.");
     if (command === "open_repository") return status("GitHub 저장소를 엽니다. (미리보기)");
     if (command === "register_shutdown") {
       const input = args.input;

@@ -133,7 +133,7 @@ describe("browser preview의 실제 Tauri raw shape", () => {
       ["open_log_folder", {}, ["current", "previous"]],
       ["check_for_updates", {}, ["status", "update"]],
       ["check_update_alert", {}, ["alertText", "shouldAlert", "status", "update"]],
-      ["open_update_release", { url: "https://github.com/x" }, ["current", "previous"]],
+      ["install_update", {}, ["current", "previous"]],
       ["open_repository", {}, ["current", "previous"]],
       ["register_shutdown", { input: { kind: "once", date: "2026-07-12", time: "23:30", days: [] } }, ["shutdown", "status"]],
       ["cancel_shutdown", { kind: "once" }, ["shutdown", "status"]],

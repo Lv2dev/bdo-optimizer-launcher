@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { normalizePayload } from "./payload.js";
 
 describe("normalizePayload", () => {
-  it.each(["open_log_folder", "open_update_release", "open_repository"])(
+  it.each(["open_log_folder", "install_update", "open_repository"])(
     "%s wraps a direct StatusDto response",
     (command) => {
       const status = { current: "완료", previous: "" };

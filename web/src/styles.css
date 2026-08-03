@@ -558,7 +558,7 @@ body.native-app-surface .app-window {
   flex: 1;
   overflow-x: hidden;
   overflow-y: auto;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: stable both-edges;
   padding: 6px 18px 14px;
   scrollbar-width: thin;
   scrollbar-color: var(--glass-stroke) transparent;
@@ -1944,9 +1944,22 @@ body.reduce-motion .acc-body {
   overflow: hidden;
 }
 
-.graph-svg path,
-.graph-svg circle {
-  transition: d 0.5s linear, cx 0.5s linear, cy 0.5s linear;
+.graph-scroll {
+  transform-box: view-box;
+  transform-origin: 0 0;
+  transform: translateX(var(--graph-shift));
+  animation: graphScrollLeft var(--graph-duration) linear both;
+  will-change: transform;
+}
+
+@keyframes graphScrollLeft {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(var(--graph-shift));
+  }
 }
 
 .graph-foot {
@@ -2290,6 +2303,20 @@ body[data-mode="light"] .accent-swatch {
   white-space: nowrap;
 }
 
+.update-summary {
+  min-width: 0;
+}
+
+.update-notes {
+  max-height: 92px;
+  margin: 6px 0 0;
+  overflow: auto;
+  color: var(--txt-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .update-box strong {
   color: var(--txt-faint);
   font-size: 11.5px;
@@ -2299,6 +2326,63 @@ body[data-mode="light"] .accent-swatch {
 .update-box.available {
   border-color: rgba(37, 208, 192, 0.52);
   color: var(--accent);
+}
+
+.update-progress {
+  margin: -2px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(37, 208, 192, 0.3);
+  border-radius: 12px;
+  background: rgba(37, 208, 192, 0.07);
+}
+
+.update-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--txt-dim);
+  font-size: 11.5px;
+}
+
+.update-progress-head strong {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.update-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.update-progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 160ms linear;
+}
+
+.update-progress-track i.indeterminate {
+  width: 36%;
+  animation: update-progress-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes update-progress-slide {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(360%);
+  }
+}
+
+body.reduce-motion .update-progress-track i.indeterminate {
+  width: 100%;
+  animation: none;
 }
 
 .app-footer {

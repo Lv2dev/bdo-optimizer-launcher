@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { mergePayload, normalizePayload } from "./payload.js";
 import { browserPreviewPayload, EMPTY_STATE } from "./browserPreview.js";
@@ -14,7 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  ExternalLink,
+  Download,
   Eye,
   FolderOpen,
   Gauge,
@@ -112,7 +112,7 @@ const PENDING_LABELS = {
   "settings-load": "설정 불러오는 중",
   "settings-save": "설정 저장 중",
   "update-check": "업데이트 확인 중",
-  "update-open": "릴리스 페이지 여는 중",
+  "update-install": "업데이트 설치 준비 중",
   "log-open": "로그 폴더 여는 중",
   "open-repo": "저장소 여는 중",
 };
@@ -195,6 +195,7 @@ const COMMAND_DOMAINS = {
   set_setting: "settings",
   check_for_updates: "update",
   check_update_alert: "update",
+  install_update: "update",
   get_monitor_snapshot: "monitor",
 };
 
@@ -1301,12 +1302,15 @@ function formatMbOfTotal(usedMb, totalMb) {
   return totalMb ? `${usedMb} / ${totalMb} MB` : `${usedMb} MB`;
 }
 
+const GRAPH_VISIBLE_SAMPLE_COUNT = 40;
+
 function emptyMonitorSeries() {
   return {
-    cpu: Array(40).fill(0),
-    mem: Array(40).fill(0),
-    gpu: Array(40).fill(0),
-    vram: Array(40).fill(0),
+    revision: 0,
+    cpu: Array(GRAPH_VISIBLE_SAMPLE_COUNT + 1).fill(0),
+    mem: Array(GRAPH_VISIBLE_SAMPLE_COUNT + 1).fill(0),
+    gpu: Array(GRAPH_VISIBLE_SAMPLE_COUNT + 1).fill(0),
+    vram: Array(GRAPH_VISIBLE_SAMPLE_COUNT + 1).fill(0),
   };
 }
 
@@ -1317,10 +1321,11 @@ function pushSeries(series, value) {
 function smoothPath(values, width, height, maxValue) {
   const max = maxValue > 0 ? maxValue : 1;
   if (values.length < 2) {
-    return { line: "", area: "" };
+    return { line: "", area: "", endX: 0 };
   }
+  const sampleStep = width / (GRAPH_VISIBLE_SAMPLE_COUNT - 1);
   const points = values.map((value, index) => [
-    (index / (values.length - 1)) * width,
+    index * sampleStep,
     height - (Math.min(value, max) / max) * (height - 6) - 3,
   ]);
   let line = `M ${points[0][0]} ${points[0][1]}`;
@@ -1332,7 +1337,8 @@ function smoothPath(values, width, height, maxValue) {
   }
   return {
     line,
-    area: `${line} L ${width} ${height} L 0 ${height} Z`,
+    area: `${line} L ${points.at(-1)[0]} ${height} L 0 ${height} Z`,
+    endX: points.at(-1)[0],
   };
 }
 
@@ -1342,13 +1348,14 @@ function graphGradientId(name) {
     .join("")}`;
 }
 
-function LiveGraph({ name, color, data, valueLabel, foot }) {
+function LiveGraph({ name, color, data, revision, durationMs, valueLabel, foot }) {
   const width = 320;
   const height = 76;
-  const { line, area } = smoothPath(data, width, height, 100);
+  const { line, area, endX } = smoothPath(data, width, height, 100);
   const current = data[data.length - 1] || 0;
   const gid = graphGradientId(name);
   const y = height - (Math.min(current, 100) / 100) * (height - 6) - 3;
+  const shiftPercent = -100 / (GRAPH_VISIBLE_SAMPLE_COUNT - 1);
 
   return (
     <div className="glass graph-card">
@@ -1370,9 +1377,18 @@ function LiveGraph({ name, color, data, valueLabel, foot }) {
         {[0.25, 0.5, 0.75].map((grid) => (
           <line key={grid} x1="0" y1={height * grid} x2={width} y2={height * grid} stroke="var(--glass-stroke)" strokeWidth="0.5" />
         ))}
-        <path d={area} fill={`url(#${gid})`} />
-        <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" />
-        <circle cx={width} cy={y} r="3.2" fill={color} />
+        <g
+          key={revision}
+          className="graph-scroll"
+          style={{
+            "--graph-shift": `${shiftPercent}%`,
+            "--graph-duration": `${durationMs}ms`,
+          }}
+        >
+          <path d={area} fill={`url(#${gid})`} />
+          <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" />
+          <circle cx={endX} cy={y} r="3.2" fill={color} />
+        </g>
       </svg>
       <div className="graph-foot">
         <span>{foot[0]}</span>
@@ -1392,12 +1408,13 @@ function MonitorTab({ state }) {
 
   useEffect(() => {
     setSeries((current) => ({
+      revision: current.revision + 1,
       cpu: pushSeries(current.cpu, metrics.cpuPct ?? 0),
       mem: pushSeries(current.mem, metrics.memPct ?? 0),
       gpu: pushSeries(current.gpu, metrics.gpuPct ?? 0),
       vram: pushSeries(current.vram, metrics.vramPct ?? 0),
     }));
-  }, [metrics.cpuPct, metrics.memPct, metrics.gpuPct, metrics.vramPct]);
+  }, [metrics]);
 
   const cores = Array.isArray(monitor.cores) ? monitor.cores : [];
 
@@ -1438,6 +1455,8 @@ function MonitorTab({ state }) {
               name="CPU"
               color="#3fd0ff"
               data={series.cpu}
+              revision={series.revision}
+              durationMs={state.settings.monitorIntervalMs || 1000}
               valueLabel={formatPercent(metrics.cpuPct)}
               foot={["0 - 100 %", monitor.pid ? `PID ${monitor.pid}` : "대기"]}
             />
@@ -1445,6 +1464,8 @@ function MonitorTab({ state }) {
               name="메모리"
               color="#b48cff"
               data={series.mem}
+              revision={series.revision}
+              durationMs={state.settings.monitorIntervalMs || 1000}
               valueLabel={formatGbOfTotal(metrics.memMb, totals.ramMb)}
               foot={["사용 / 총", `R ${formatKbs(metrics.diskReadKbs)}`]}
             />
@@ -1452,6 +1473,8 @@ function MonitorTab({ state }) {
               name="GPU"
               color="#34e0a1"
               data={series.gpu}
+              revision={series.revision}
+              durationMs={state.settings.monitorIntervalMs || 1000}
               valueLabel={formatPercent(metrics.gpuPct)}
               foot={["0 - 100 %", metrics.fpsText || "세션 미시작"]}
             />
@@ -1459,6 +1482,8 @@ function MonitorTab({ state }) {
               name="VRAM"
               color="#ff9b6e"
               data={series.vram}
+              revision={series.revision}
+              durationMs={state.settings.monitorIntervalMs || 1000}
               valueLabel={formatMbOfTotal(metrics.vramMb, totals.vramMb)}
               foot={["사용 / 총", `W ${formatKbs(metrics.diskWriteKbs)}`]}
             />
@@ -1492,7 +1517,14 @@ function MonitorTab({ state }) {
   );
 }
 
-function SettingsTab({ state, pending, runCommand, showToast }) {
+function SettingsTab({
+  state,
+  pending,
+  runCommand,
+  showToast,
+  installUpdate = () => {},
+  updateProgress = { phase: "idle", percent: null },
+}) {
   const settings = state.settings;
   const update = state.update;
   const canRunCommand = pending === null;
@@ -1756,11 +1788,11 @@ function SettingsTab({ state, pending, runCommand, showToast }) {
 
       <section className="glass panel">
         <div className="set-head">
-          <ExternalLink aria-hidden="true" style={{ opacity: 0.7 }} />
+          <Download aria-hidden="true" style={{ opacity: 0.7 }} />
           업데이트
-          <Help tip="GitHub Release에서 새 버전을 확인합니다" />
+          <Help tip="새 버전을 앱에서 내려받아 서명을 확인하고 설치합니다" />
         </div>
-        <p className="panel-sub">새 릴리스가 있으면 GitHub 릴리스 페이지로 이동합니다.</p>
+        <p className="panel-sub">새 버전을 확인하고 앱 안에서 안전하게 설치합니다.</p>
         <div className="set-row" style={{ paddingTop: 4 }}>
           <div className="meta">
             <div className="t">업데이트 알림</div>
@@ -1791,9 +1823,36 @@ function SettingsTab({ state, pending, runCommand, showToast }) {
           />
         </div>
         <div className={`update-box${update.available ? " available" : ""}`}>
-          <span>{update.statusText}</span>
+          <div className="update-summary">
+            <span>{update.statusText}</span>
+            {update.notes ? <p className="update-notes">{update.notes}</p> : null}
+          </div>
           <strong>v{update.appVersion}</strong>
         </div>
+        {updateProgress.phase !== "idle" ? (
+          <div className="update-progress" role="status" aria-live="polite">
+            <div className="update-progress-head">
+              <span>
+                {updateProgress.phase === "installing"
+                  ? "서명 확인 완료 · 설치 프로그램 시작 중"
+                  : updateProgress.phase === "verifying"
+                    ? "다운로드 완료 · 서명 확인 중"
+                    : "업데이트 다운로드 중"}
+              </span>
+              {updateProgress.percent === null ? null : <strong>{updateProgress.percent}%</strong>}
+            </div>
+            <div className="update-progress-track" aria-hidden="true">
+              <i
+                className={updateProgress.percent === null ? "indeterminate" : ""}
+                style={
+                  updateProgress.percent === null
+                    ? undefined
+                    : { width: `${updateProgress.percent}%` }
+                }
+              />
+            </div>
+          </div>
+        ) : null}
         <div className="row">
           <button
             type="button"
@@ -1807,13 +1866,11 @@ function SettingsTab({ state, pending, runCommand, showToast }) {
           <button
             type="button"
             className="btn btn-primary"
-            disabled={!canRunCommand || !update.available || !update.releaseUrl}
-            onClick={() =>
-              runCommand("update-open", "open_update_release", { url: update.releaseUrl })
-            }
+            disabled={!canRunCommand || !update.available}
+            onClick={installUpdate}
           >
-            <ExternalLink aria-hidden="true" />
-            릴리스 열기
+            <Download aria-hidden="true" />
+            업데이트 설치
           </button>
         </div>
       </section>
@@ -1853,11 +1910,16 @@ function App({
   nativeInvoke = invoke,
   runtimeCheck = isTauriRuntime,
   previewInvoke = browserPreviewPayload,
+  channelFactory = (onmessage) => new Channel(onmessage),
   initialState = EMPTY_STATE,
 }) {
   const [state, setState] = useState(initialState);
   const [launcherPath, setLauncherPath] = useState("");
   const [pending, setPending] = useState(null);
+  const [updateProgress, setUpdateProgress] = useState({
+    phase: "idle",
+    percent: null,
+  });
   const [activeTab, setActiveTab] = useState(0);
   const [accent, setAccent] = useState(GLASS_THEME.accent);
   const [toast, setToast] = useState({ show: false, message: "" });
@@ -1993,6 +2055,44 @@ function App({
       // 백그라운드 업데이트 확인 실패는 수동 확인 버튼의 명시 오류 흐름에 맡긴다.
     }
   }, [applyPayload, nativeInvoke, previewInvoke, runtimeCheck, showToast, state.settings.updateAlertEnabled]);
+
+  const installUpdate = useCallback(async () => {
+    const onProgress = (event) => {
+      if (event?.event === "installing") {
+        setUpdateProgress({ phase: "installing", percent: 100 });
+        return;
+      }
+      if (event?.event === "verifying") {
+        setUpdateProgress({ phase: "verifying", percent: 100 });
+        return;
+      }
+      if (event?.event === "started") {
+        setUpdateProgress({ phase: "downloading", percent: event.data?.contentLength ? 0 : null });
+        return;
+      }
+      if (event?.event === "progress") {
+        const total = Number(event.data?.contentLength);
+        const downloaded = Number(event.data?.downloaded);
+        const percent =
+          Number.isFinite(total) && total > 0 && Number.isFinite(downloaded)
+            ? Math.min(100, Math.max(0, Math.round((downloaded / total) * 100)))
+            : null;
+        setUpdateProgress({ phase: "downloading", percent });
+      }
+    };
+
+    setUpdateProgress({ phase: "downloading", percent: null });
+    try {
+      const nativeRuntime = runtimeCheck();
+      const args = nativeRuntime ? { onEvent: channelFactory(onProgress) } : undefined;
+      if (!nativeRuntime) {
+        onProgress({ event: "installing" });
+      }
+      await runCommand("update-install", "install_update", args);
+    } finally {
+      setUpdateProgress({ phase: "idle", percent: null });
+    }
+  }, [channelFactory, runCommand, runtimeCheck]);
 
   const reloadSchedule = useCallback(async () => {
     if (scheduleReloadInFlight.current) {
@@ -2240,6 +2340,8 @@ function App({
               pending={pending}
               runCommand={runCommand}
               showToast={showToast}
+              installUpdate={installUpdate}
+              updateProgress={updateProgress}
             />
           )}
         </div>

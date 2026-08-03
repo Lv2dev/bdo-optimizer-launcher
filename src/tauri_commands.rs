@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
+use tauri::{ipc::Channel, AppHandle, State};
 use windows::Win32::System::Threading::{
     HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
 };
@@ -245,6 +246,7 @@ pub struct UpdateStateDto {
     pub release_url: String,
     pub app_version: String,
     pub latest_version: Option<String>,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -549,17 +551,13 @@ fn settings_command_response(
 }
 
 fn initial_update_state() -> UpdateStateDto {
-    let status_text = if update::configured_release_api_url().is_some() {
-        "업데이트 확인 전."
-    } else {
-        "업데이트 채널 미설정."
-    };
     update_state(
-        status_text.to_string(),
+        "업데이트 확인 전.".to_string(),
         false,
         false,
         String::new(),
         env!("APP_VERSION").to_string(),
+        None,
         None,
     )
 }
@@ -571,6 +569,7 @@ fn update_state(
     release_url: String,
     app_version: String,
     latest_version: Option<String>,
+    notes: Option<String>,
 ) -> UpdateStateDto {
     UpdateStateDto {
         status_text,
@@ -579,6 +578,7 @@ fn update_state(
         release_url,
         app_version,
         latest_version,
+        notes,
     }
 }
 
@@ -590,6 +590,7 @@ fn update_state_for_test(
     release_url: String,
     app_version: String,
     latest_version: Option<String>,
+    notes: Option<String>,
 ) -> UpdateStateDto {
     update_state(
         status_text,
@@ -598,6 +599,7 @@ fn update_state_for_test(
         release_url,
         app_version,
         latest_version,
+        notes,
     )
 }
 
@@ -606,9 +608,10 @@ fn update_state_from_check(check: update::UpdateCheck) -> UpdateStateDto {
         check.status_text,
         check.update_available,
         false,
-        check.release_url,
+        String::new(),
         env!("APP_VERSION").to_string(),
         Some(check.latest_version),
+        check.notes,
     )
 }
 
@@ -1530,42 +1533,40 @@ pub fn open_log_folder() -> StatusDto {
 }
 
 #[tauri::command]
-pub fn check_for_updates() -> UpdateCommandResponseDto {
-    match update::check_latest_release() {
-        Ok(check) => {
-            let state = update_state_from_check(check);
-            update_command_response(state.status_text.clone(), state)
-        }
-        Err(update::Error::ChannelNotConfigured) => update_command_response(
-            "업데이트 채널이 설정되지 않았습니다.",
-            update_state(
-                "업데이트 채널 미설정.".to_string(),
-                false,
-                false,
-                String::new(),
-                env!("APP_VERSION").to_string(),
-                None,
-            ),
-        ),
-        Err(error) => {
-            let message = error.to_string();
-            update_command_response(
-                message.clone(),
-                update_state(
-                    message,
-                    false,
-                    false,
-                    String::new(),
-                    env!("APP_VERSION").to_string(),
-                    None,
-                ),
-            )
-        }
-    }
+pub async fn check_for_updates(
+    app: AppHandle,
+    pending_update: State<'_, update::PendingUpdateState>,
+) -> Result<UpdateCommandResponseDto, String> {
+    Ok(
+        match update::check_latest_release(&app, &pending_update).await {
+            Ok(check) => {
+                let state = update_state_from_check(check);
+                update_command_response(state.status_text.clone(), state)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                update_command_response(
+                    message.clone(),
+                    update_state(
+                        message,
+                        false,
+                        false,
+                        String::new(),
+                        env!("APP_VERSION").to_string(),
+                        None,
+                        None,
+                    ),
+                )
+            }
+        },
+    )
 }
 
 #[tauri::command]
-pub fn check_update_alert() -> Result<UpdateAlertCommandResponseDto, String> {
+pub async fn check_update_alert(
+    app: AppHandle,
+    pending_update: State<'_, update::PendingUpdateState>,
+) -> Result<UpdateAlertCommandResponseDto, String> {
     if !settings::load_settings().update_alert_enabled {
         return Ok(update_alert_command_response(
             "업데이트 알림이 꺼져 있습니다.",
@@ -1575,7 +1576,7 @@ pub fn check_update_alert() -> Result<UpdateAlertCommandResponseDto, String> {
         ));
     }
 
-    match update::check_latest_release() {
+    match update::check_latest_release(&app, &pending_update).await {
         Ok(check) => {
             let should_alert = if check.update_available {
                 let _guard = settings::write_lock();
@@ -1609,19 +1610,6 @@ pub fn check_update_alert() -> Result<UpdateAlertCommandResponseDto, String> {
                 alert_text,
             ))
         }
-        Err(update::Error::ChannelNotConfigured) => Ok(update_alert_command_response(
-            "업데이트 채널이 설정되지 않았습니다.",
-            update_state(
-                "업데이트 채널 미설정.".to_string(),
-                false,
-                false,
-                String::new(),
-                env!("APP_VERSION").to_string(),
-                None,
-            ),
-            false,
-            String::new(),
-        )),
         Err(error) => {
             let message = error.to_string();
             Ok(update_alert_command_response(
@@ -1633,6 +1621,7 @@ pub fn check_update_alert() -> Result<UpdateAlertCommandResponseDto, String> {
                     String::new(),
                     env!("APP_VERSION").to_string(),
                     None,
+                    None,
                 ),
                 false,
                 String::new(),
@@ -1642,14 +1631,14 @@ pub fn check_update_alert() -> Result<UpdateAlertCommandResponseDto, String> {
 }
 
 #[tauri::command]
-pub fn open_update_release(url: String) -> StatusDto {
-    if url.trim().is_empty() {
-        return status("열 수 있는 릴리스 페이지가 없습니다.");
-    }
-    match update::open_release_page(&url) {
-        Ok(()) => status("GitHub Release 페이지를 열었습니다."),
-        Err(error) => status(error.to_string()),
-    }
+pub async fn install_update(
+    pending_update: State<'_, update::PendingUpdateState>,
+    on_event: Channel<update::UpdateProgressEvent>,
+) -> Result<StatusDto, String> {
+    update::install_pending_update(&pending_update, on_event)
+        .await
+        .map(|()| status("업데이트 설치 프로그램을 시작했습니다."))
+        .map_err(|error| error.to_string())
 }
 
 // M96: 앱 푸터에서 여는 GitHub 저장소 URL. open_release_page의 github.com 화이트리스트를 통과한다.
@@ -2238,6 +2227,7 @@ mod tests {
             "https://github.com/owner/repo/releases/tag/v0.2.0".to_string(),
             "0.1.0".to_string(),
             Some("0.2.0".to_string()),
+            Some("변경 사항".to_string()),
         );
 
         let value = serde_json::to_value(state).unwrap();
@@ -2250,7 +2240,8 @@ mod tests {
                 "checking": false,
                 "releaseUrl": "https://github.com/owner/repo/releases/tag/v0.2.0",
                 "appVersion": "0.1.0",
-                "latestVersion": "0.2.0"
+                "latestVersion": "0.2.0",
+                "notes": "변경 사항"
             })
         );
     }
@@ -2435,6 +2426,7 @@ mod tests {
                 false,
                 String::new(),
                 "0.1.0".to_string(),
+                None,
                 None,
             ),
             monitor: monitor_not_running_state_for_test(
