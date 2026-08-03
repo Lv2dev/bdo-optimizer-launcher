@@ -212,7 +212,8 @@ jobs:
           RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
         run: |
           $version = $env:RELEASE_TAG.Substring(1)
-          ./.trusted-release-tools/scripts/smoke_test_installer.ps1 -Installer target/release/bdo-optimizer-launcher-setup.exe -ExpectedVersion $version -AllowSystemChanges
+          $installer = (Resolve-Path -LiteralPath "target/release/bdo-optimizer-launcher-setup.exe").Path
+          ./.trusted-release-tools/scripts/smoke_test_installer.ps1 -Installer $installer -ExpectedVersion $version -AllowSystemChanges
           $global:LASTEXITCODE = 0
 
       - name: Compute release asset SHA-256

@@ -326,8 +326,13 @@ Assert-Match $release 'TRUSTED_WORKFLOW_SHA:\s*\$\{\{ github\.sha \}\}' "release
 Assert-Match $release 'git -C \.trusted-release-tools rev-parse HEAD' "release must verify the trusted harness checkout identity"
 Assert-Match $release '\./\.trusted-release-tools/scripts/check_release_workflow\.ps1' "release must run the guard from the trusted workflow commit"
 Assert-Match $release '\./\.trusted-release-tools/scripts/smoke_test_installer\.ps1' "release must run the smoke harness from the trusted workflow commit"
+Assert-Match $release '\$installer\s*=\s*\(Resolve-Path -LiteralPath "target/release/bdo-optimizer-launcher-setup\.exe"\)\.Path' "release must resolve the tag-built installer before calling the separately checked-out harness"
+Assert-Match $release '\./\.trusted-release-tools/scripts/smoke_test_installer\.ps1 -Installer \$installer' "release must pass the absolute installer path to the trusted smoke harness"
 if ($release -match '(?m)^\s*\./scripts/smoke_test_installer\.ps1(?:\s|$)') {
     throw "release must not run the immutable tag's legacy smoke harness"
+}
+if ($release -match 'smoke_test_installer\.ps1 -Installer\s+target/release/') {
+    throw "release must not let the trusted harness resolve an installer path relative to its own checkout"
 }
 Assert-Match $release '(?ms)^\s{6}- name: Smoke test install, upgrade, and uninstall cleanup\r?\n\s{8}timeout-minutes:\s*10\r?\n\s{8}shell:\s*pwsh\s*$' "installer smoke workflow step must have a ten-minute timeout"
 Assert-Match $release 'smoke_test_installer\.ps1[^\r\n]*\r?\n\s*\$global:LASTEXITCODE = 0' "release workflow must normalize a successful legacy smoke script native exit code"
