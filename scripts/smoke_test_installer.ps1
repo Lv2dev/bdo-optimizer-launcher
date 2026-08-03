@@ -84,6 +84,24 @@ function Test-Task([string]$name) {
     return $LASTEXITCODE -eq 0
 }
 
+function Wait-UninstalledContract([int]$TimeoutSeconds) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $remainingTasks = @($taskNames | Where-Object { Test-Task $_ })
+        $installedExePresent = Test-Path -LiteralPath $installedExe
+        $uninstallKeyPresent = Test-Path -LiteralPath $uninstallKey
+        if ($remainingTasks.Count -eq 0 -and -not $installedExePresent -and -not $uninstallKeyPresent) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $residue = @($remainingTasks | ForEach-Object { "task=$_" })
+    if ($installedExePresent) { $residue += "installed-exe" }
+    if ($uninstallKeyPresent) { $residue += "uninstall-registry" }
+    throw "Uninstall cleanup did not finish within $TimeoutSeconds seconds: $($residue -join ', ')"
+}
+
 function Test-DangerousUntrustedAce([string]$path) {
     return Test-SddlDangerousUntrustedAce (Get-InstallerAclSddl $path) $untrustedSids
 }
@@ -169,6 +187,7 @@ try {
         throw "Failed to prepare already-absent uninstall task case: $preDeletedTask"
     }
     Invoke-Checked $uninstaller @("/S") "silent uninstall"
+    Wait-UninstalledContract 15
     foreach ($name in $taskNames) {
         if (Test-Task $name) { throw "Uninstall left orphan task: $name" }
     }

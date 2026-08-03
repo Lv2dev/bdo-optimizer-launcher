@@ -340,6 +340,10 @@ Assert-Match $installerSmoke 'Start-Process -FilePath \$file -ArgumentList \$arg
 Assert-Match $installerSmoke '\$process\.WaitForExit\(\$TimeoutSeconds \* 1000\)' "installer smoke must bound the target PID wait"
 Assert-Match $installerSmoke 'Stop-Process -Id \$process\.Id -Force' "installer smoke must terminate a timed-out target process"
 Assert-Match $installerSmoke 'installer smoke phase: \$scenario' "installer smoke must identify the phase that hangs"
+Assert-Match $installerSmoke 'function Wait-UninstalledContract\(\[int\]\$TimeoutSeconds\)' "installer smoke must wait for NSIS self-copy cleanup postconditions"
+Assert-Match $installerSmoke '\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)' "uninstall postcondition wait must be bounded"
+Assert-Match $installerSmoke 'Invoke-Checked \$uninstaller @\("/S"\) "silent uninstall"\s*\r?\n\s*Wait-UninstalledContract 15' "installer smoke must wait for uninstall postconditions before asserting cleanup"
+Assert-Match $installerSmoke 'Uninstall cleanup did not finish within \$TimeoutSeconds seconds' "uninstall postcondition timeout must identify remaining residue"
 if ($installerSmoke -match '(?m)^\s*\$process\s*=\s*Start-Process[^\r\n]+-Wait(?:\s|$)') {
     throw "installer smoke must not wait for a relaunched resident process tree"
 }

@@ -203,6 +203,8 @@ try {
     Assert-MutationRejected "scripts\smoke_test_installer.ps1" '"/P", "/UPDATE", "/R", "/ARGS", "--minimized"' '"/S"'
     Assert-MutationRejected "scripts\smoke_test_installer.ps1" '-PassThru -WindowStyle Hidden' '-Wait -PassThru -WindowStyle Hidden'
     Assert-MutationRejected "scripts\smoke_test_installer.ps1" '\$process\.WaitForExit\(\$TimeoutSeconds \* 1000\)' '$process.WaitForExit()'
+    Assert-MutationRejected "scripts\smoke_test_installer.ps1" 'Wait-UninstalledContract 15' 'Wait-UninstalledContract 0'
+    Assert-MutationRejected "scripts\smoke_test_installer.ps1" 'Uninstall cleanup did not finish within \$TimeoutSeconds seconds' 'Uninstall cleanup stalled'
     Assert-MutationRejected ".github\workflows\release.yml" 'timeout-minutes:\s*10' 'timeout-minutes: 0'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s+)ref:\s*\$\{\{ github\.sha \}\}\s*$' '$1ref: refs/tags/${{ inputs.tag }}'
     Assert-MutationRejected ".github\workflows\release.yml" '(?m)^(\s+)path:\s*\.trusted-release-tools\s*$' '$1path: .tag-release-tools'
