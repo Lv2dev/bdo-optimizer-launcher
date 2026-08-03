@@ -1,7 +1,7 @@
 {
   "name": "bdo-optimizer-launcher",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1421 --strictPort",
@@ -26,5 +26,8 @@
     "jsdom": "^29.1.1",
     "vite": "^8.0.16",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "postcss": "8.5.25"
   }
 }

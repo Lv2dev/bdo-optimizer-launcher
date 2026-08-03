@@ -46,6 +46,7 @@ $readme = Read-RootFile "README.md"
 $manifest = Read-RootFile "app.manifest"
 $devManifest = Read-RootFile "app.dev.manifest"
 $cargo = Read-RootFile "Cargo.toml"
+$cargoLock = Read-RootFile "Cargo.lock"
 $package = (Read-RootFile "package.json") | ConvertFrom-Json
 $packageLock = (Read-RootFile "package-lock.json") | ConvertFrom-Json -AsHashtable
 $tauri = (Read-RootFile "tauri.conf.json") | ConvertFrom-Json
@@ -56,6 +57,8 @@ $installerTemplate = Read-RootFile "windows\installer.nsi"
 $installerHooks = Read-RootFile "windows\hooks.nsh"
 $installerSmoke = Read-RootFile "scripts\smoke_test_installer.ps1"
 $installerAclGuard = Read-RootFile "scripts\installer_acl_guard.ps1"
+$updaterManifest = Read-RootFile "scripts\create_updater_manifest.ps1"
+$updaterManifestTest = Read-RootFile "scripts\test_updater_manifest.ps1"
 
 Assert-CommonControlsV6 $manifest "app.manifest"
 Assert-CommonControlsV6 $devManifest "app.dev.manifest"
@@ -81,6 +84,26 @@ Assert-ExecutionLevel $devManifest "asInvoker" "app.dev.manifest"
 $versionMatch = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"')
 if (-not $versionMatch.Success) { throw "Cargo.toml package.version not found" }
 $version = $versionMatch.Groups[1].Value
+$releaseNotesRelative = "docs\releases\$version.md"
+$releaseNotesPath = Join-Path $root $releaseNotesRelative
+if (-not (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf)) {
+    throw "Korean release notes are missing: $releaseNotesRelative"
+}
+$releaseNotes = [IO.File]::ReadAllText($releaseNotesPath).Replace("`r`n", "`n").Replace("`r", "`n").Trim()
+$releaseNoteLines = @($releaseNotes -split "`n")
+if ($releaseNoteLines.Count -lt 2 -or $releaseNoteLines[0] -cne "## 변경 사항") {
+    throw "Release notes must start with the exact Korean heading '## 변경 사항'"
+}
+$releaseBullets = @($releaseNoteLines | Select-Object -Skip 1 | Where-Object { $_.Length -gt 0 })
+if ($releaseBullets.Count -eq 0 -or @($releaseBullets | Where-Object { $_ -notmatch '^- \S' }).Count -gt 0) {
+    throw "Release notes may contain only non-empty Markdown bullets after the heading"
+}
+if (@($releaseBullets | Where-Object { $_ -notmatch '[가-힣]' }).Count -gt 0) {
+    throw "Every release note bullet must contain a Korean change description"
+}
+if ($releaseNotes -match '(?i)(?<![A-Za-z])(PR|CI)(?![A-Za-z])|SHA-?256|SmartScreen|커밋|마일스톤|테스트|빌드|검증|요구사항') {
+    throw "Release notes contain internal verification or generic installation details"
+}
 $lockRootVersion = $packageLock['packages']['']['version']
 $versions = @{
     "package.json" = [string]$package.version
@@ -155,11 +178,32 @@ if ($ReleaseTag) {
 if ([string]$package.scripts.'tauri:build' -ne 'tauri build') {
     throw "package.json tauri:build must be exactly 'tauri build'"
 }
+$requiredPostcssVersion = '8.5.25'
+if ([string]$package.overrides.postcss -cne $requiredPostcssVersion) {
+    throw "package.json must pin the PostCSS security override to $requiredPostcssVersion"
+}
+$postcssLock = $packageLock['packages']['node_modules/postcss']
+if ($postcssLock -isnot [Collections.IDictionary] -or
+    [string]$postcssLock['version'] -cne $requiredPostcssVersion -or
+    [string]$postcssLock['resolved'] -cne "https://registry.npmjs.org/postcss/-/postcss-$requiredPostcssVersion.tgz") {
+    throw "package-lock.json must resolve PostCSS exactly to $requiredPostcssVersion"
+}
 if (-not $tauri.bundle.active) { throw "Tauri bundle must be active" }
+if ($tauri.bundle.createUpdaterArtifacts -ne $true) { throw "Tauri updater artifacts must be enabled" }
 if (@($tauri.bundle.targets) -notcontains 'nsis') { throw "Tauri bundle targets must include nsis" }
 if ($tauri.bundle.windows.nsis.installMode -ne 'perMachine') { throw "NSIS installMode must be perMachine" }
 if ($tauri.bundle.windows.nsis.installerHooks -ne './windows/hooks.nsh') { throw "NSIS uninstall cleanup hook is missing" }
 if ($tauri.bundle.windows.nsis.template -ne './windows/installer.nsi') { throw "Pinned NSIS template is missing" }
+$expectedUpdaterPublicKey = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1QUI2NTg0MjEwQTMwRTAKUldUZ01Bb2hoR1dyNVVYUFdmVmRXa3lPVDB2aVJCZ2JraGJZbnFOYklXNEp2Qk02S01XUXlwSTIK'
+if ([string]$tauri.plugins.updater.pubkey -cne $expectedUpdaterPublicKey) { throw "Updater public key changed without explicit migration" }
+$updaterEndpoints = @($tauri.plugins.updater.endpoints)
+if ($updaterEndpoints.Count -ne 1 -or [string]$updaterEndpoints[0] -cne 'https://github.com/Lv2dev/bdo-optimizer-launcher/releases/latest/download/latest.json') {
+    throw "Updater endpoint must be the exact production GitHub latest.json URL"
+}
+if ([string]$tauri.plugins.updater.windows.installMode -cne 'passive') { throw "Windows updater installMode must be passive" }
+Assert-Match $cargo '(?m)^tauri-plugin-updater\s*=\s*"2"\s*$' "Rust updater plugin dependency is missing"
+Assert-Match $cargo '(?m)^minisign-verify\s*=\s*"=0\.2\.5"\s*$' "Artifact signature verifier must be pinned"
+Assert-Match $cargoLock '(?ms)^name = "tauri-plugin-updater"\r?\nversion = "2\.10\.1"$' "Locked updater plugin version changed"
 if ([string]$package.devDependencies.'@tauri-apps/cli' -cne '2.11.2') { throw "Tauri CLI must be pinned to 2.11.2" }
 if ([string]$packageLock['packages']['node_modules/@tauri-apps/cli']['version'] -cne '2.11.2') {
     throw "package-lock Tauri CLI must be 2.11.2"
@@ -177,6 +221,7 @@ if ($installerTemplate -match 'StrCpy\s+\$R1\s+"\$R1 /UPDATE"') { throw "NSIS up
 Assert-Match $installerTemplate '!if "\$\{INSTALLMODE\}" != "perMachine"[\s\S]*?!insertmacro MUI_PAGE_DIRECTORY[\s\S]*?!endif' "per-machine installer must not expose the directory page"
 Assert-Match $installerTemplate 'Section Install[\s\S]*?NSIS_HOOK_PREINSTALL[\s\S]*?SetOutPath \$INSTDIR' "NSIS preinstall guard must run before SetOutPath"
 Assert-Match $installerTemplate 'existing NSIS uninstaller is never elevated by a newer installer' "NSIS upgrades must not execute an untrusted existing uninstaller"
+Assert-Match $installerTemplate '(?ms)Function \.onInstSuccess.*?/R.*?/ARGS.*?nsis_tauri_utils::RunAsUser' "NSIS updater must restart the installed app with forwarded arguments"
 Assert-Match $installerTemplate '\$\{If\} \$\{Silent\}[\s\S]*?\$WixMode <> 1[\s\S]*?Goto reinst_done' "silent NSIS upgrades must use the in-place path"
 Assert-Match $installerTemplate '\$PassiveMode = 1[\s\S]*?\$WixMode <> 1[\s\S]*?Goto reinst_done' "passive NSIS upgrades must use the in-place path"
 Assert-Match $installerTemplate '\$WixMode = 1[\s\S]*?ReadRegStr \$R1 HKLM "\$R6" "UninstallString"[\s\S]*?ExecWait' "WiX migration must retain its trusted msiexec uninstall path"
@@ -210,6 +255,9 @@ Assert-Match $installerSmoke 'installer_acl_guard\.ps1' "Installer smoke must lo
 Assert-Match $installerAclGuard 'RawSecurityDescriptor' "Installer ACL guard must inspect raw SDDL"
 Assert-Match $installerAclGuard 'GetSecurityDescriptorSddlForm' "Installer ACL guard must read owner and ACE SIDs without name translation"
 Assert-Match $installerSmoke 'taskXmlBefore' "Installer smoke must compare task XML across upgrade"
+Assert-Match $installerSmoke 'Invoke-Checked \$installerPath @\("/P", "/UPDATE", "/R", "/ARGS", "--minimized"\)' "Installer smoke must exercise the updater passive install and restart arguments"
+Assert-Match $installerSmoke 'Wait-InstalledProcess \$true 15' "Installer smoke must verify updater restart"
+Assert-Match $installerSmoke 'Stop-Process -Id \$process\.ProcessId -Force' "Installer smoke must stop only the exact restarted installed process"
 Assert-Match $installerSmoke 'First install unexpectedly created task' "Installer smoke must assert initial task absence before seeding fixtures"
 Assert-Match $installerSmoke 'Untrusted existing uninstaller was executed' "Installer smoke must prove upgrades do not execute the previous UninstallString"
 Assert-Match $installerSmoke 'already-absent uninstall task case' "Installer smoke must verify that an already-absent task is accepted"
@@ -249,11 +297,27 @@ Assert-Match $release 'compare/\$env:EXPECTED_COMMIT\.\.\.\$env:DEFAULT_BRANCH' 
 Assert-Match $release '(?ms)^\s{6}- name:\s*Revalidate release tag identity.*?^\s{6}- name:\s*Create GitHub Release' "publish tag identity check must run before release creation"
 Assert-Match $release 'Reject an existing release tag' "publish must reject an existing release"
 Assert-Match $release 'overwrite_files:\s*false' "release assets must be immutable"
+Assert-Match $release 'generate_release_notes:\s*false' "release must disable generated PR and commit notes"
+Assert-Match $release 'body_path:\s*release-assets/release-notes\.md' "release must publish the reviewed Korean body file"
+Assert-Match $release 'docs/releases/\$version\.md' "release build must stage the notes matching the product version"
+if ($release -match '(?m)^\s+body:\s*(?:\||>)?\s*$') { throw "release workflow must not embed a fixed body" }
 Assert-Match $release '(?m)^concurrency:' "release workflow must serialize each release tag"
 Assert-Match $release 'npm test' "release workflow must run frontend tests"
 Assert-Match $release 'npm run tauri:build' "release workflow must use tauri build"
+Assert-Match $release 'TAURI_SIGNING_PRIVATE_KEY:\s*\$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}' "release build must receive updater private key through secrets"
+Assert-Match $release 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD:\s*\$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}' "release build must receive updater key password through secrets"
+if ($release -match '(?m)^\s*run:.*TAURI_SIGNING_PRIVATE_KEY' -or $release -match '\$env:TAURI_SIGNING_PRIVATE_KEY') {
+    throw "Updater private key must never be referenced by workflow run source"
+}
 Assert-Match $release 'PreReleaseLabel\.Length' "all SemVer prerelease labels must be classified"
 Assert-Match $release 'bdo-optimizer-launcher-setup\.exe' "release assets must use the NSIS installer"
+Assert-Match $release 'bdo-optimizer-launcher-setup\.exe\.sig' "release must publish the updater signature"
+Assert-Match $release 'release-assets/latest\.json' "release must publish the static updater manifest"
+Assert-Match $release 'backend::update::tests::release_artifact_signature_matches_embedded_public_key --locked -- --ignored --exact' "release must run the exact artifact signature test against the embedded public key"
+Assert-Match $release 'create_updater_manifest\.ps1' "release must generate latest.json through the validated script"
+Assert-Match $release 'create_updater_manifest\.ps1[^\r\n]+-NotesPath docs/releases/\$version\.md' "updater manifest must use the reviewed versioned Korean release notes"
+Assert-Match $updaterManifest 'notes\s*=\s*\$notes' "updater manifest must publish release notes for the in-app UI"
+Assert-Match $release "foreach \(\`$name in @\('bdo-optimizer-launcher-setup\.exe', 'bdo-optimizer-launcher-setup\.exe\.sig', 'latest\.json', 'manual\.pdf'\)\)" "publish must reverify every updater asset hash"
 Assert-Match $release 'check_tauri_embed\.ps1' "release workflow must verify embedded production assets"
 Assert-Match $release 'check_tauri_embed\.ps1[^\r\n]+-ExpectedVersion\s+\$version[^\r\n]+-ExpectedExecutionLevel\s+requireAdministrator' "release embed check must verify version and elevation"
 Assert-Match $release 'smoke_test_installer\.ps1' "release workflow must smoke test installer lifecycle"
@@ -278,8 +342,43 @@ if ($release -match '(?m)run:\s*cargo build --release') { throw "bare cargo rele
 Assert-Match $ci 'npm test' "CI must run frontend tests"
 Assert-Match $ci 'cargo audit' "CI must run RustSec cargo audit"
 Assert-Match $ci 'cargo-audit --version 0\.22\.2 --locked' "CI cargo-audit version must be pinned"
+Assert-Match $ci 'test_updater_manifest\.ps1' "CI must run updater manifest behavioral tests"
+Assert-Match $updaterManifest 'Repository -cne "Lv2dev/bdo-optimizer-launcher"' "updater manifest must pin the approved repository"
+Assert-Match $updaterManifest 'https://github\.com/\$Repository/releases/download/\$Tag/' "updater manifest must use an HTTPS GitHub Release asset"
+Assert-Match $updaterManifest 'windows-x86_64' "updater manifest must declare the Windows x64 platform"
+Assert-Match $updaterManifestTest 'attacker/repo' "updater manifest tests must reject a foreign repository"
+Assert-Match $updaterManifestTest 'tag/version pair' "updater manifest tests must reject tag/version mismatch"
 Assert-Match $readme 'bdo-optimizer-launcher-setup\.exe' "README must document the installer"
 Assert-Match $readme 'Get-FileHash\s+\.\\bdo-optimizer-launcher-setup\.exe\s+-Algorithm\s+SHA256' "README installer hash command missing"
 Assert-Match $readme 'npm test' "README developer verification must include frontend tests"
+Assert-Match $readme '<img\s+src="assets/app_256\.png"\s+width="112"\s+alt="BDO Optimizer Launcher 로고">' "README product logo is missing or inaccessible"
+Assert-Match $readme '<a href="\.\./\.\./releases/latest"><strong>최신 버전 받기</strong></a>' "README latest release link is missing"
+Assert-Match $readme '<a href="docs/distribution/manual\.pdf"><strong>사용 설명서</strong></a>' "README manual link is missing"
+Assert-Match $readme '<img\s+src="docs/readme/overview\.png"\s+width="760"\s+alt="BDO Optimizer Launcher 제어 탭에서 게임 상태와 CPU 최적화 모드를 관리하는 화면">' "README overview image or Korean alt text is missing"
+Assert-Match $readme '<img\s+src="docs/readme/app-tour\.gif"\s+width="720"\s+alt="BDO Optimizer Launcher의 제어, 스케줄, 모니터, 설정 탭을 순서대로 보여주는 제품 화면">' "README app tour or Korean alt text is missing"
+Assert-Match $readme '(?s)assets/app_256\.png.*?\.\./\.\./releases/latest.*?docs/distribution/manual\.pdf.*?docs/readme/overview\.png.*?## 화면 둘러보기.*?docs/readme/app-tour\.gif' "README visual onboarding order changed"
+
+$overviewPath = Join-Path $root "docs\readme\overview.png"
+$tourPath = Join-Path $root "docs\readme\app-tour.gif"
+foreach ($path in @($overviewPath, $tourPath)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "README visual asset is missing: $([IO.Path]::GetRelativePath($root, $path))"
+    }
+    if ((Get-Item -LiteralPath $path).Length -ge 10MB) {
+        throw "README visual asset must stay below 10 MB: $([IO.Path]::GetRelativePath($root, $path))"
+    }
+}
+$overviewBytes = [IO.File]::ReadAllBytes($overviewPath)
+if ($overviewBytes.Length -lt 8 -or [BitConverter]::ToString($overviewBytes[0..7]) -cne '89-50-4E-47-0D-0A-1A-0A') {
+    throw "README overview.png is not a valid PNG"
+}
+$tourBytes = [IO.File]::ReadAllBytes($tourPath)
+$tourHeader = if ($tourBytes.Length -ge 6) { [Text.Encoding]::ASCII.GetString($tourBytes, 0, 6) } else { "" }
+if ($tourHeader -notin @('GIF87a', 'GIF89a')) {
+    throw "README app-tour.gif is not a valid GIF"
+}
+if ((Get-Item -LiteralPath $overviewPath).Length + (Get-Item -LiteralPath $tourPath).Length -gt 8MB) {
+    throw "README visual assets exceed the 8 MB combined budget"
+}
 
 Write-Host "release workflow checks passed for version $version"
