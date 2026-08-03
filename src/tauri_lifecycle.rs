@@ -1,14 +1,15 @@
-use crate::backend::{process, schedule, settings, shutdown, tray, window};
+use crate::backend::{autostart, process, schedule, settings, shutdown, tray, window};
 use crate::tauri_commands;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Mutex, OnceLock,
 };
 use std::thread;
 use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::webview::{PageLoadEvent, PageLoadPayload};
 use tauri::{App, AppHandle, Manager, WindowEvent};
 
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -19,6 +20,11 @@ const MENU_APPLY_LOW_POWER: &str = "tray_apply_low_power";
 const MENU_CANCEL_SHUTDOWN: &str = "tray_cancel_shutdown";
 const MENU_QUIT: &str = "tray_quit";
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray_16.png");
+const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+static MAIN_WEBVIEW_READY: AtomicBool = AtomicBool::new(false);
+static START_MINIMIZED_REQUESTED: OnceLock<bool> = OnceLock::new();
+static STARTUP_VISIBILITY_SYNC: Mutex<()> = Mutex::new(());
 
 type TauriMenuItem = MenuItem<tauri::Wry>;
 type TauriTrayIcon = TrayIcon<tauri::Wry>;
@@ -35,6 +41,20 @@ enum TrayLifecycleCommand {
     ApplyMode(schedule::OptimizeMode),
     CancelShutdown,
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageLoadAction {
+    Ignore,
+    KeepHidden,
+    Show,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowRestoreStep {
+    Unminimize,
+    Show,
+    Focus,
 }
 
 #[cfg(test)]
@@ -174,21 +194,129 @@ impl LifecycleState {
 
 pub fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let app_handle = app.handle().clone();
+    let start_minimized = startup_minimized();
     match build_tray(&app_handle) {
         Ok(state) => {
-            let _ = app_handle.manage(state);
+            with_startup_visibility_sync(|| {
+                let _ = app_handle.manage(state);
+                sync_toggle_label_from_window(&app_handle);
+            });
             sync_tray_mode(&app_handle, current_game_mode());
-            if start_minimized_requested(std::env::args()) {
-                hide_main_window(&app_handle);
+            if legacy_autostart_repair_required(start_minimized) {
+                start_legacy_autostart_repair();
             }
             start_auto_low_power_worker(app_handle.clone());
         }
         Err(error) => {
             tracing::warn!(error = %error, "tauri tray init failed");
+            if start_minimized {
+                return Err(Box::new(error));
+            }
         }
     }
     register_window_close_handler(&app_handle);
+    start_webview_readiness_watchdog(app_handle);
     Ok(())
+}
+
+pub fn initialize_startup() {
+    let _ = START_MINIMIZED_REQUESTED.set(start_minimized_requested(std::env::args()));
+}
+
+fn startup_minimized() -> bool {
+    *START_MINIMIZED_REQUESTED.get_or_init(|| start_minimized_requested(std::env::args()))
+}
+
+fn legacy_autostart_repair_required(_start_minimized: bool) -> bool {
+    true
+}
+
+fn setup_toggle_label_visibility(window_visible: Option<bool>) -> bool {
+    window_visible.unwrap_or(false)
+}
+
+fn with_visibility_sync<T>(lock: &Mutex<()>, operation: impl FnOnce() -> T) -> T {
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation()
+}
+
+fn with_startup_visibility_sync<T>(operation: impl FnOnce() -> T) -> T {
+    with_visibility_sync(&STARTUP_VISIBILITY_SYNC, operation)
+}
+
+fn sync_toggle_label_from_window(app: &AppHandle) {
+    let window_visible = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .and_then(|window| window.is_visible().ok());
+    if let Some(state) = app.try_state::<LifecycleState>() {
+        state.set_toggle_label(setup_toggle_label_visibility(window_visible));
+    }
+}
+
+fn page_load_action(
+    is_main: bool,
+    finished: bool,
+    was_ready: bool,
+    start_minimized: bool,
+) -> PageLoadAction {
+    if !is_main || !finished || was_ready {
+        PageLoadAction::Ignore
+    } else if start_minimized {
+        PageLoadAction::KeepHidden
+    } else {
+        PageLoadAction::Show
+    }
+}
+
+pub fn on_page_load(webview: &tauri::Webview, payload: &PageLoadPayload<'_>) {
+    let is_main = webview.label() == MAIN_WINDOW_LABEL;
+    let finished = payload.event() == PageLoadEvent::Finished;
+    if !is_main || !finished {
+        return;
+    }
+
+    let was_ready = MAIN_WEBVIEW_READY.swap(true, Ordering::AcqRel);
+    let start_minimized = startup_minimized();
+    tracing::info!(
+        url = %payload.url(),
+        was_ready,
+        start_minimized,
+        "main webview page load finished"
+    );
+    match page_load_action(is_main, finished, was_ready, start_minimized) {
+        PageLoadAction::Show => with_startup_visibility_sync(|| {
+            show_main_window(webview.app_handle());
+        }),
+        PageLoadAction::KeepHidden => with_startup_visibility_sync(|| {
+            hide_main_window(webview.app_handle());
+        }),
+        PageLoadAction::Ignore => {}
+    }
+}
+
+fn start_webview_readiness_watchdog(app: AppHandle) {
+    thread::spawn(move || {
+        thread::sleep(WEBVIEW_READY_TIMEOUT);
+        if readiness_timeout_requires_exit(MAIN_WEBVIEW_READY.load(Ordering::Acquire)) {
+            tracing::error!(
+                timeout_seconds = WEBVIEW_READY_TIMEOUT.as_secs(),
+                "main webview readiness timeout; exiting for Task Scheduler restart"
+            );
+            app.exit(1);
+        }
+    });
+}
+
+fn readiness_timeout_requires_exit(ready: bool) -> bool {
+    !ready
+}
+
+fn start_legacy_autostart_repair() {
+    thread::spawn(|| match autostart::repair_legacy_autostart() {
+        Ok(true) => tracing::info!("legacy 72-hour autostart task migrated"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(error = %error, "legacy autostart migration failed"),
+    });
 }
 
 pub(crate) fn sync_tray_mode(app: &AppHandle, mode: Option<schedule::OptimizeMode>) {
@@ -404,9 +532,16 @@ where
 
 fn toggle_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        tracing::warn!("main webview window not found; toggle ignored");
         return;
     };
-    let visible = window.is_visible().unwrap_or(false);
+    let visible = match window.is_visible() {
+        Ok(visible) => visible,
+        Err(error) => {
+            tracing::warn!(error = %error, "main window visibility query failed");
+            return;
+        }
+    };
     if visible {
         hide_main_window(app);
     } else {
@@ -414,12 +549,35 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
+fn restore_window_with(
+    mut apply: impl FnMut(WindowRestoreStep) -> Result<(), String>,
+) -> Result<(), (WindowRestoreStep, String)> {
+    for step in [
+        WindowRestoreStep::Unminimize,
+        WindowRestoreStep::Show,
+        WindowRestoreStep::Focus,
+    ] {
+        apply(step).map_err(|error| (step, error))?;
+    }
+    Ok(())
+}
+
 fn show_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        tracing::warn!("main webview window not found; show ignored");
         return;
     };
-    let _ = window.show();
-    let _ = window.set_focus();
+    if let Err((step, error)) = restore_window_with(|step| {
+        match step {
+            WindowRestoreStep::Unminimize => window.unminimize(),
+            WindowRestoreStep::Show => window.show(),
+            WindowRestoreStep::Focus => window.set_focus(),
+        }
+        .map_err(|error| error.to_string())
+    }) {
+        tracing::warn!(?step, error, "main window restore failed");
+        return;
+    }
     if let Some(state) = app.try_state::<LifecycleState>() {
         state.set_toggle_label(true);
     }
@@ -427,9 +585,13 @@ fn show_main_window(app: &AppHandle) {
 
 fn hide_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        tracing::warn!("main webview window not found; hide ignored");
         return;
     };
-    let _ = window.hide();
+    if let Err(error) = window.hide() {
+        tracing::warn!(error = %error, "main window hide failed");
+        return;
+    }
     if let Some(state) = app.try_state::<LifecycleState>() {
         state.set_toggle_label(false);
     }
@@ -716,6 +878,120 @@ mod tests {
     fn start_minimized_arg_is_detected_for_autostart_tray_launch() {
         assert!(start_minimized_requested(["app.exe", "--minimized"]));
         assert!(!start_minimized_requested(["app.exe"]));
+    }
+
+    #[test]
+    fn legacy_autostart_repair_covers_windowed_and_minimized_startup() {
+        assert!(legacy_autostart_repair_required(false));
+        assert!(legacy_autostart_repair_required(true));
+    }
+
+    #[test]
+    fn setup_toggle_label_uses_actual_window_visibility_after_page_load_race() {
+        assert!(setup_toggle_label_visibility(Some(true)));
+        assert!(!setup_toggle_label_visibility(Some(false)));
+        assert!(!setup_toggle_label_visibility(None));
+
+        let lock = std::sync::Arc::new(Mutex::new(()));
+        let label = std::sync::Arc::new(AtomicBool::new(false));
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let setup_lock = lock.clone();
+            let setup_label = label.clone();
+            scope.spawn(move || {
+                with_visibility_sync(&setup_lock, || {
+                    let stale_visibility = false;
+                    read_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                    setup_label.store(stale_visibility, Ordering::Release);
+                });
+            });
+
+            read_rx.recv().unwrap();
+            let page_lock = lock.clone();
+            let page_label = label.clone();
+            scope.spawn(move || {
+                with_visibility_sync(&page_lock, || {
+                    page_label.store(true, Ordering::Release);
+                });
+            });
+            continue_tx.send(()).unwrap();
+        });
+        assert!(label.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn main_window_stays_hidden_until_webview_reports_ready() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+
+        assert_eq!(
+            config["app"]["windows"][0]["visible"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn first_main_page_finish_shows_manual_launch_and_keeps_autostart_hidden() {
+        assert_eq!(
+            page_load_action(true, true, false, false),
+            PageLoadAction::Show
+        );
+        assert_eq!(
+            page_load_action(true, true, false, true),
+            PageLoadAction::KeepHidden
+        );
+        assert_eq!(
+            page_load_action(true, false, false, false),
+            PageLoadAction::Ignore
+        );
+        assert_eq!(
+            page_load_action(true, true, true, false),
+            PageLoadAction::Ignore
+        );
+        assert_eq!(
+            page_load_action(false, true, false, false),
+            PageLoadAction::Ignore
+        );
+    }
+
+    #[test]
+    fn webview_timeout_exits_only_before_first_page_finish() {
+        assert!(readiness_timeout_requires_exit(false));
+        assert!(!readiness_timeout_requires_exit(true));
+    }
+
+    #[test]
+    fn window_restore_runs_unminimize_show_focus_in_order_and_stops_on_error() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        restore_window_with(|step| {
+            calls.borrow_mut().push(step);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            calls.into_inner(),
+            vec![
+                WindowRestoreStep::Unminimize,
+                WindowRestoreStep::Show,
+                WindowRestoreStep::Focus
+            ]
+        );
+
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = restore_window_with(|step| {
+            calls.borrow_mut().push(step);
+            (step != WindowRestoreStep::Show)
+                .then_some(())
+                .ok_or_else(|| "show failed".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error.0, WindowRestoreStep::Show);
+        assert_eq!(
+            calls.into_inner(),
+            vec![WindowRestoreStep::Unminimize, WindowRestoreStep::Show]
+        );
     }
 
     #[test]
