@@ -26,6 +26,7 @@ $schtasks = Join-Path $env:SystemRoot "System32\schtasks.exe"
 $icacls = Join-Path $env:SystemRoot "System32\icacls.exe"
 $cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
 $taskNames = @("BDO_Optimizer_Launcher_Autostart", "BDO_Auto_Shutdown_Once", "BDO_Auto_Shutdown_Weekly")
+$processTimeoutSeconds = 120
 $fixtureId = [Guid]::NewGuid().ToString("N")
 $untrustedUninstallMarker = Join-Path $env:TEMP "bdo-untrusted-uninstaller-$fixtureId.txt"
 $reparseTarget = Join-Path $env:TEMP "bdo-installer-reparse-target-$fixtureId"
@@ -33,14 +34,30 @@ $reparsePath = Join-Path $installDir "reparse-fixture"
 $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $untrustedSids = @("S-1-1-0", "S-1-5-11", "S-1-5-32-545", $currentUserSid)
 
-function Invoke-Checked([string]$file, [string[]]$arguments) {
-    $process = Start-Process -FilePath $file -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -ne 0) { throw "$file failed with exit code $($process.ExitCode)" }
+function Invoke-BoundedProcess([string]$file, [string[]]$arguments, [string]$scenario, [int]$TimeoutSeconds) {
+    Write-Host "installer smoke phase: $scenario"
+    $process = Start-Process -FilePath $file -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    try {
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $null = $process.WaitForExit(5000)
+            throw "$scenario timed out after $TimeoutSeconds seconds"
+        }
+        Write-Host "installer smoke phase complete: $scenario"
+        return $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Invoke-Checked([string]$file, [string[]]$arguments, [string]$scenario) {
+    $exitCode = Invoke-BoundedProcess $file $arguments $scenario $processTimeoutSeconds
+    if ($exitCode -ne 0) { throw "$scenario failed with exit code $exitCode" }
 }
 
 function Invoke-ExpectedFailure([string]$file, [string[]]$arguments, [string]$scenario) {
-    $process = Start-Process -FilePath $file -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -eq 0) { throw "$scenario unexpectedly succeeded" }
+    $exitCode = Invoke-BoundedProcess $file $arguments $scenario $processTimeoutSeconds
+    if ($exitCode -eq 0) { throw "$scenario unexpectedly succeeded" }
 }
 
 function Get-InstalledProcesses {
@@ -99,7 +116,7 @@ foreach ($name in $taskNames) {
 }
 
 try {
-    Invoke-Checked $installerPath @("/S")
+    Invoke-Checked $installerPath @("/S") "first install"
     Assert-InstalledContract
 
     foreach ($name in $taskNames) {
@@ -130,7 +147,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Failed to seed user-writable installer ACL" }
     if (-not (Test-DangerousUntrustedAce $installDir)) { throw "Seeded user-writable ACL was not observable" }
 
-    Invoke-Checked $installerPath @("/P", "/UPDATE", "/R", "/ARGS", "--minimized")
+    Invoke-Checked $installerPath @("/P", "/UPDATE", "/R", "/ARGS", "--minimized") "passive update and restart"
     $restartedProcesses = @(Wait-InstalledProcess $true 15)
     foreach ($process in $restartedProcesses) {
         Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
@@ -151,7 +168,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or (Test-Task $preDeletedTask)) {
         throw "Failed to prepare already-absent uninstall task case: $preDeletedTask"
     }
-    Invoke-Checked $uninstaller @("/S")
+    Invoke-Checked $uninstaller @("/S") "silent uninstall"
     foreach ($name in $taskNames) {
         if (Test-Task $name) { throw "Uninstall left orphan task: $name" }
     }
@@ -166,7 +183,12 @@ try {
     }
     Remove-Item -LiteralPath $untrustedUninstallMarker -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
-        Start-Process -FilePath $uninstaller -ArgumentList @("/S") -Wait -WindowStyle Hidden
+        try {
+            $cleanupExitCode = Invoke-BoundedProcess $uninstaller @("/S") "cleanup uninstall" $processTimeoutSeconds
+            if ($cleanupExitCode -ne 0) { Write-Warning "Cleanup uninstaller exited with code $cleanupExitCode" }
+        } catch {
+            Write-Warning "Cleanup uninstaller failed: $($_.Exception.Message)"
+        }
     }
     foreach ($name in $taskNames) {
         & $schtasks /Delete /TN $name /F *> $null

@@ -193,6 +193,7 @@ jobs:
           ./scripts/create_updater_manifest.ps1 -Version $version -Tag $env:RELEASE_TAG -Repository $env:REPOSITORY -InstallerPath target/release/bdo-optimizer-launcher-setup.exe -SignaturePath target/release/bdo-optimizer-launcher-setup.exe.sig -NotesPath docs/releases/$version.md -OutputPath target/release/latest.json
 
       - name: Smoke test install, upgrade, and uninstall cleanup
+        timeout-minutes: 10
         shell: pwsh
         env:
           RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}

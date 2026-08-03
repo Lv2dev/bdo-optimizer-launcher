@@ -321,7 +321,15 @@ Assert-Match $release "foreach \(\`$name in @\('bdo-optimizer-launcher-setup\.ex
 Assert-Match $release 'check_tauri_embed\.ps1' "release workflow must verify embedded production assets"
 Assert-Match $release 'check_tauri_embed\.ps1[^\r\n]+-ExpectedVersion\s+\$version[^\r\n]+-ExpectedExecutionLevel\s+requireAdministrator' "release embed check must verify version and elevation"
 Assert-Match $release 'smoke_test_installer\.ps1' "release workflow must smoke test installer lifecycle"
+Assert-Match $release '(?ms)^\s{6}- name: Smoke test install, upgrade, and uninstall cleanup\r?\n\s{8}timeout-minutes:\s*10\r?\n\s{8}shell:\s*pwsh\s*$' "installer smoke workflow step must have a ten-minute timeout"
 Assert-Match $release 'smoke_test_installer\.ps1[^\r\n]*\r?\n\s*\$global:LASTEXITCODE = 0' "release workflow must normalize a successful legacy smoke script native exit code"
+Assert-Match $installerSmoke 'Start-Process -FilePath \$file -ArgumentList \$arguments -PassThru -WindowStyle Hidden' "installer smoke must start the target process without descendant-tree waiting"
+Assert-Match $installerSmoke '\$process\.WaitForExit\(\$TimeoutSeconds \* 1000\)' "installer smoke must bound the target PID wait"
+Assert-Match $installerSmoke 'Stop-Process -Id \$process\.Id -Force' "installer smoke must terminate a timed-out target process"
+Assert-Match $installerSmoke 'installer smoke phase: \$scenario' "installer smoke must identify the phase that hangs"
+if ($installerSmoke -match '(?m)^\s*\$process\s*=\s*Start-Process[^\r\n]+-Wait(?:\s|$)') {
+    throw "installer smoke must not wait for a relaunched resident process tree"
+}
 if ([regex]::Matches($release, '(?m)^\s+\$global:LASTEXITCODE = 0\s*$').Count -ne 1) {
     throw "release workflow must normalize the legacy smoke exit code exactly once"
 }
