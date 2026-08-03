@@ -321,6 +321,14 @@ Assert-Match $release "foreach \(\`$name in @\('bdo-optimizer-launcher-setup\.ex
 Assert-Match $release 'check_tauri_embed\.ps1' "release workflow must verify embedded production assets"
 Assert-Match $release 'check_tauri_embed\.ps1[^\r\n]+-ExpectedVersion\s+\$version[^\r\n]+-ExpectedExecutionLevel\s+requireAdministrator' "release embed check must verify version and elevation"
 Assert-Match $release 'smoke_test_installer\.ps1' "release workflow must smoke test installer lifecycle"
+Assert-Match $release '(?ms)^\s{6}- name: Checkout trusted release harness\r?\n\s{8}uses:\s*actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5[^\r\n]*\r?\n\s{8}with:\s*\r?\n\s{10}ref:\s*\$\{\{ github\.sha \}\}\s*\r?\n\s{10}path:\s*\.trusted-release-tools\s*\r?\n\s{10}fetch-depth:\s*1\s*\r?\n\s{10}persist-credentials:\s*false\s*$' "release harness must be checked out from the immutable trusted workflow commit"
+Assert-Match $release 'TRUSTED_WORKFLOW_SHA:\s*\$\{\{ github\.sha \}\}' "release must bind the harness verification to the workflow commit"
+Assert-Match $release 'git -C \.trusted-release-tools rev-parse HEAD' "release must verify the trusted harness checkout identity"
+Assert-Match $release '\./\.trusted-release-tools/scripts/check_release_workflow\.ps1' "release must run the guard from the trusted workflow commit"
+Assert-Match $release '\./\.trusted-release-tools/scripts/smoke_test_installer\.ps1' "release must run the smoke harness from the trusted workflow commit"
+if ($release -match '(?m)^\s*\./scripts/smoke_test_installer\.ps1(?:\s|$)') {
+    throw "release must not run the immutable tag's legacy smoke harness"
+}
 Assert-Match $release '(?ms)^\s{6}- name: Smoke test install, upgrade, and uninstall cleanup\r?\n\s{8}timeout-minutes:\s*10\r?\n\s{8}shell:\s*pwsh\s*$' "installer smoke workflow step must have a ten-minute timeout"
 Assert-Match $release 'smoke_test_installer\.ps1[^\r\n]*\r?\n\s*\$global:LASTEXITCODE = 0' "release workflow must normalize a successful legacy smoke script native exit code"
 Assert-Match $installerSmoke 'Start-Process -FilePath \$file -ArgumentList \$arguments -PassThru -WindowStyle Hidden' "installer smoke must start the target process without descendant-tree waiting"
